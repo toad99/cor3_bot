@@ -1,0 +1,13 @@
+# Données personnelles et état local : ne jamais les versionner
+config.toml
+chrome-profile/
+state.json
+state.json.tmp
+cor3_bot.lock
+logs/
+
+# Python / outils
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/

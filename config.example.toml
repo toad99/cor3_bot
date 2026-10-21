@@ -1,0 +1,74 @@
+# Copie ce fichier en config.toml puis adapte-le.
+# Les actions qui dépensent des CR ou suppriment quelque chose sont DÉSACTIVÉES par défaut :
+# c'est toi qui les actives ici, en connaissance de cause.
+
+[general]
+# Profil Chrome dédié au bot (créé au premier lancement). N'utilise pas ton profil Chrome habituel.
+profile_dir = "C:/cor3_bot/chrome-profile"
+# "chrome" = Google Chrome installé ; "" = Chromium fourni par Playwright
+channel = "chrome"
+headless = false          # garde false au début : tu verras ce que fait le bot
+log_dir = "logs"
+dry_run = false           # true = lit et résout tout, mais ne valide rien
+state_file = "state.json"  # mémoire entre deux passages (daily faite, minuteurs des marchés)
+
+[daily]
+enabled = true
+
+[markets]
+# Les 4 marchés. Chacun a son propre minuteur de renouvellement des contrats ; une fois échu, il ne
+# repart que si on rouvre l'onglet Contrats de ce marché : le bot le fait à chaque passage (et en
+# mode --auto dès qu'un minuteur est échu). Retire un marché que tu n'as pas encore débloqué.
+enabled = true
+names = ["Home Server", "D4RK RM7MI", "SRM7-M", "URM7-M"]
+
+[jobs]
+enabled = true
+markets = []              # marchés où signer de nouveaux jobs ; [] = tous ceux de [markets]
+# Types gérés sans risque de suppression : DecryptFile, DownloadLog, DownloadFile
+types = ["DecryptFile", "DownloadLog", "DownloadFile"]
+allow_deletions = false   # IP Cleanup, Log Deletion, File Elimination (suppression sur le serveur)
+allow_ip_add = false      # IP Injection (ajout d'IP) — écran non vérifié en direct
+max_jobs_per_run = 3
+max_deposit_cr = 0        # 0 = ne signe jamais un job qui demande un dépôt
+max_rep_penalty = 100     # ignore les jobs dont la pénalité REP dépasse ce seuil
+skip_servers = []         # ex. ["RM7-N2ECP"]
+# Préréglages Loadout (noms exacts de tes préréglages) selon l'extension du fichier
+decrypt_presets = { eb52x = "decrypt", ab52p = "decrypt", default = "big decrypt" }
+restore_preset = "hack"   # remis à la fin des jobs ; "" pour ne rien changer
+# Serveur sans accès « par tâche » (condition Acquisition, ou accès perdu après une maintenance) :
+# le bot se connecte avec l'outil de piratage du loadout (direct, ou mini-jeu ICE WALL). Le
+# « force hack » payant n'est jamais utilisé. Un ICE WALL raté verrouille le mini-jeu 20 min.
+allow_hack = true
+# Préréglage à mettre avant de pirater, selon le type du serveur (serverTypeName, écrit dans le
+# journal à chaque piratage). Clé = nom exact ou morceau du nom ; ajoute ici ton « hack t4 ».
+hack_presets = { SOYUZ = "hack soyuz", default = "hack" }
+
+[mercenaries]
+enabled = true            # suivi des expéditions en cours (répond aux événements) : ne dépense rien
+hire = false              # engager un mercenaire = dépense de CR
+pay_on_return = false     # payer le solde au retour et récupérer le butin = dépense de CR
+max_spend_cr = 6000       # coût total maximum d'une expédition
+keep_min_balance = 5000   # ne jamais descendre sous ce solde
+max_death_chance = 0      # % de risque de mort accepté (devis du jeu)
+preferred = ["Crimson"]   # ordre de préférence des mercenaires
+only_preferred = false
+location = ""             # vide = lieu proposé par défaut (ex. "Skylift Remains")
+goal = ""                 # vide = objectif par défaut (ex. "Item Retrieval")
+event_policy = "prudent"  # prudent = moindre risque | gourmand = plus de butin si risque <= max | auto = laisser le jeu choisir
+max_risk_modifier = 10
+watch_minutes = 40        # durée max de surveillance (un raid fait ~20 min)
+hire_market = "Home Server"  # marché où engager (onglet Engager)
+
+[notify]
+windows_toast = true      # notification Windows (session ouverte requise)
+discord_webhook = ""      # URL d'un webhook Discord (alerte sur ton téléphone)
+ntfy_topic = ""           # ou un sujet ntfy.sh privé
+notify_on_success = false
+
+[auto]
+# Mode --auto (tâche horaire « cor3_bot_auto ») : Chrome ne s'ouvre que si quelque chose est dû
+# (daily pas faite, minuteur de marché échu, expédition en cours). Il n'engage jamais de mercenaire.
+hours = [0, 24]                # heures locales autorisées [début, fin[ ; ex. [8, 23]
+skip_if_user_active_min = 10   # pas de passage si tu as utilisé le PC il y a moins de N min (0 = toujours)
+warn_daily_hours = 3           # alerte si la daily n'est pas faite N h avant le reset (00:00 UTC)

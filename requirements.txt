@@ -1,0 +1,6 @@
+playwright>=1.48
+msgpack>=1.0
+# tests et développement uniquement
+pytest>=8
+websockets>=12
+pyflakes>=3

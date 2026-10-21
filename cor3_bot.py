@@ -1,0 +1,2103 @@
+#!/usr/bin/env python3
+"""cor3_bot : automatisation quotidienne de cor3.gg (ARG Fragmentary Order).
+
+Commandes (depuis le dossier du script, venv activé) :
+  python cor3_bot.py --login          1re fois : ouvre le profil Chrome dédié pour te connecter
+  python cor3_bot.py                  exécution normale (daily, jobs, mercenaires selon config.toml)
+  python cor3_bot.py --dry-run        simulation : lit et résout tout, mais ne valide rien
+  python cor3_bot.py --only daily     une seule partie : daily, jobs, markets ou mercs (répétable)
+  python cor3_bot.py --auto           passage horaire : ne fait que ce qui est dû (state.json)
+  python cor3_bot.py --test-notify    envoie une alerte de test
+
+Codes de sortie : 0 = tout OK, 1 = au moins une étape en échec, 2 = config/connexion/session.
+Le Planificateur de tâches affiche ce code dans « Résultat de la dernière exécution ».
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import logging
+import os
+import re
+import subprocess
+import sys
+import time
+import tomllib
+import traceback
+import urllib.parse
+import urllib.request
+from collections import deque
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable
+
+import msgpack
+from playwright.sync_api import Locator, Page, sync_playwright
+from playwright.sync_api import Error as PWError
+from playwright.sync_api import TimeoutError as PWTimeout
+
+from solvers import (
+    CODE_LENGTH_BY_DIFFICULTY, ERROR_LABELS, Cell, Glyph, SignalError,
+    analyse_log_line, decode_signal, ice_anchor_index, solve_ice_wall_partial,
+)
+
+ROOT = Path(__file__).resolve().parent
+GAME_URL = "https://cor3.gg/"
+TESTED_FRONTEND = "v1.25.51"
+UTC = dt.timezone.utc
+
+HOME_SERVER = "Home Server"
+# Les 4 marchés (guide + inspection du 21/10/2026) : chacun a ses contrats, sa réputation et son
+# minuteur de renouvellement (nextJobsResetAt). Une fois le minuteur échu, il ne repart que quand
+# on rouvre l'onglet Contrats de ce marché : c'est ce que fait le bot.
+DEFAULT_MARKETS = [HOME_SERVER, "D4RK RM7MI", "SRM7-M", "URM7-M"]
+ACTIVE_EXPEDITION = {"PREPARING", "RUNNING", "EVENT", "RETURNING"}
+
+# ---------------------------------------------------------------------------
+# Sélecteurs. On s'appuie sur des attributs posés par le build du jeu :
+#   data-onboarding-300-id, data-sentry-component / data-sentry-element,
+#   data-component-name, et quelques classes CSS « en clair » (pulse-bar, log-entry…).
+# Les classes générées « go1234567 » changent d'un build à l'autre : ne pas les utiliser.
+# ---------------------------------------------------------------------------
+DOCK = {
+    "game_center": "TabBarItem-019a0c41-b17f-7abc-1234-567890abcde2",
+    "network_map": "TabBarItem-NETWORK_MAP",
+    "expeditions": "TabBarItem-EXPEDITIONS",
+    "loadout": "LoadoutTabBarItem",
+}
+APP_SIGNAL_DECODE = "019aea65-b0c2-70e9-bbbc-8caed416854c"
+
+
+def comp(name: str) -> str:
+    return f'[data-sentry-component="{name}"]'
+
+
+def cname(name: str) -> str:
+    return f'[data-component-name="{name}"]'
+
+
+WINDOW = comp("AppWindow")
+CLOSE_BTN = cname("close-app-btn")
+SAI_APP = comp("ServerAdministrationInterfaceApplication")
+SAI_LOGIN = comp("SaiLogin")
+
+
+def rx(pattern: str) -> re.Pattern:
+    return re.compile(pattern, re.I)
+
+
+# Libellés FR | EN (le bureau suit la langue choisie, les mini-jeux restent en anglais).
+TXT = {
+    "daily_card": r"^\s*(OPÉRATIONS QUOTIDIENNES|DAILY OPS)\s*$",
+    "open_module": r"^\s*Open Module\s*$",
+    "market": r"^\s*(Marché|Market)\s*$",
+    "contracts": r"^\s*(Contrats|Contracts)\s*$",
+    "hire_tab": r"^\s*(Engager|Hire)\s*$",
+    "read_more": r"^\s*(LIRE PLUS|READ MORE)\s*$",
+    "sign": r"^\s*(Signer|Sign)\s*$",
+    "complete": r"^\s*(Terminer|Complete)\s*$",
+    "infos": r"^\s*(Infos|Info)\s*$",
+    "ready": r"PRÊT À TERMINER|READY TO COMPLETE",
+    "in_progress": r"EN COURS|IN PROGRESS",
+    "connect": r"^\s*(Connecter|Connect)\s*$",
+    "login": r"^\s*(Connexion|Login)\s*$",
+    "decrypt": r"^\s*(Déchiffrer|Decrypt)\s*$",
+    "tab_logs": r"^\s*(JOURNAUX|LOGS)\s*$",
+    "tab_files": r"^\s*(FICHIERS|FILES)\s*$",
+    "tab_transit": r"^\s*(ACCÈS DE TRANSIT|TRANSIT ACCESS)\s*$",
+    "presets": r"^\s*(Préréglages|Presets)\s*$",
+    "apply": r"^\s*(APPLIQUER|APPLY)\s*$",
+    "back": r"^\s*(Retour|Back)\s*$",
+    "hire_pay": r"verser un acompte|pay.*deposit|hire and",
+    "disconnected": r"DÉCONNECTÉ|DISCONNECTED",
+}
+
+
+class SessionLost(RuntimeError):
+    """Le serveur a donné la session à un autre onglet ou appareil."""
+
+
+class StepFailed(RuntimeError):
+    """Étape impossible : on arrête proprement cette partie et on alerte."""
+
+
+class LoginRequired(RuntimeError):
+    """Le profil dédié n'est pas (ou plus) connecté à cor3.gg."""
+
+
+class Unavailable(StepFailed):
+    """Serveur en maintenance, injoignable ou absent de la carte : état normal du jeu, on réessaiera."""
+
+    def __init__(self, message: str, retry_at: dt.datetime | None = None):
+        super().__init__(message)
+        self.retry_at = retry_at
+
+
+class Simulated(StepFailed):
+    """Mode --dry-run : la suite dépend d'une action qu'on n'a pas faite (ex. piratage)."""
+
+
+# ---------------------------------------------------------------------------
+# Configuration, journal, alertes
+# ---------------------------------------------------------------------------
+def load_config(path: Path) -> dict:
+    if not path.exists():
+        raise SystemExit(f"Config introuvable : {path}. Copie config.example.toml en config.toml.")
+    with path.open("rb") as fh:
+        cfg = tomllib.load(fh)
+    cfg.setdefault("general", {})
+    for section in ("daily", "jobs", "markets", "mercenaries", "notify", "auto"):
+        cfg.setdefault(section, {})
+    return cfg
+
+
+def market_names(cfg: dict) -> list[str]:
+    return list(cfg.get("markets", {}).get("names") or DEFAULT_MARKETS)
+
+
+def parse_time(value: Any) -> dt.datetime | None:
+    """Date du jeu -> datetime UTC. Le serveur envoie des chaînes ISO (« 2026-10-21T09:38:18.462Z »),
+    des timestamps msgpack (déjà convertis en datetime) ou des millisecondes."""
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    if isinstance(value, dt.datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    if isinstance(value, (int, float)):
+        return dt.datetime.fromtimestamp(value / 1000 if value > 1e11 else value, UTC)
+    if isinstance(value, str):
+        try:
+            parsed = dt.datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    return None
+
+
+def local_time(value: Any) -> str:
+    """Heure locale lisible (journal, alertes)."""
+    when = parse_time(value)
+    return when.astimezone().strftime("%d/%m %H:%M") if when else "?"
+
+
+def utc_now() -> dt.datetime:
+    return dt.datetime.now(UTC)
+
+
+class State:
+    """Mémoire entre deux passages (state.json) : daily faite, minuteur de chaque marché,
+    expédition en cours. Le mode --auto s'en sert pour ne lancer le navigateur que si besoin."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.data: dict = {"daily_done": None, "daily_warned": None, "markets": {}, "expedition_active": False}
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                self.data.update(loaded)
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError):
+            pass                                  # fichier abîmé : on repart de zéro
+        if not isinstance(self.data.get("markets"), dict):
+            self.data["markets"] = {}
+
+    # ----- marchés -----
+    def set_market_reset(self, name: str, value: Any, now: dt.datetime | None = None) -> None:
+        now = now or utc_now()
+        when = parse_time(value)
+        entry = self.data["markets"].setdefault(name, {})
+        entry["checked"] = now.isoformat(timespec="seconds")
+        entry["next_reset"] = when.isoformat(timespec="seconds") if when else None
+        entry.pop("problem", None)
+        entry.pop("retry_at", None)
+        if when and when <= now:                  # minuteur échu mais pas relancé : on repassera
+            entry["retry_at"] = (now + dt.timedelta(minutes=30)).isoformat(timespec="seconds")
+
+    def set_market_retry(self, name: str, when: dt.datetime | None, problem: str,
+                         now: dt.datetime | None = None) -> None:
+        now = now or utc_now()
+        entry = self.data["markets"].setdefault(name, {})
+        entry["retry_at"] = (when or now + dt.timedelta(hours=1)).isoformat(timespec="seconds")
+        entry["problem"] = problem
+
+    def market_due(self, name: str, now: dt.datetime | None = None) -> bool:
+        now = now or utc_now()
+        entry = self.data["markets"].get(name)
+        if not entry:
+            return True
+        retry = parse_time(entry.get("retry_at"))
+        if retry:
+            return now >= retry
+        reset = parse_time(entry.get("next_reset"))
+        if reset:
+            return now >= reset
+        checked = parse_time(entry.get("checked"))
+        return checked is None or now - checked >= dt.timedelta(hours=6)
+
+    def next_market_time(self, name: str) -> dt.datetime | None:
+        entry = self.data["markets"].get(name) or {}
+        return parse_time(entry.get("retry_at")) or parse_time(entry.get("next_reset"))
+
+    # ----- daily (reset à 00:00 UTC) -----
+    def daily_done_today(self, now: dt.datetime | None = None) -> bool:
+        return self.data.get("daily_done") == (now or utc_now()).date().isoformat()
+
+    def mark_daily_done(self, now: dt.datetime | None = None) -> None:
+        self.data["daily_done"] = (now or utc_now()).date().isoformat()
+
+    # ----- mercenaires -----
+    def set_expedition(self, active: bool) -> None:
+        self.data["expedition_active"] = bool(active)
+
+    def due(self, cfg: dict, now: dt.datetime | None = None) -> dict[str, str]:
+        """Parties à lancer maintenant (mode --auto), avec la raison."""
+        now = now or utc_now()
+        due: dict[str, str] = {}
+        if cfg["daily"].get("enabled", True) and not self.daily_done_today(now):
+            due["daily"] = "daily pas encore faite aujourd'hui (UTC)"
+        late = [n for n in market_names(cfg) if self.market_due(n, now)]
+        if late:
+            why = "minuteur échu ou inconnu : " + ", ".join(late)
+            if cfg["jobs"].get("enabled", False):
+                due["jobs"] = why
+            elif cfg["markets"].get("enabled", True):
+                due["markets"] = why
+        if cfg["mercenaries"].get("enabled", False) and self.data.get("expedition_active"):
+            due["mercs"] = "expédition en cours"
+        return due
+
+    def save(self) -> None:
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        tmp.write_text(json.dumps(self.data, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+        tmp.replace(self.path)
+
+
+def pid_alive(pid: int) -> bool:
+    """Le processus existe-t-il encore ? (sous Windows, os.kill(pid, 0) tuerait le processus)"""
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            handle = kernel32.OpenProcess(0x1000, False, pid)        # PROCESS_QUERY_LIMITED_INFORMATION
+            if not handle:
+                return ctypes.get_last_error() == 5                   # accès refusé = il existe
+            code = ctypes.c_ulong()
+            ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+            kernel32.CloseHandle(handle)
+            return bool(ok) and code.value == 259                     # STILL_ACTIVE
+        except Exception:
+            return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def lock_busy(lock: Path, max_age_h: float = 3) -> bool:
+    """Verrou d'une autre exécution encore vivante (un verrou laissé par un processus tué est ignoré)."""
+    try:
+        if time.time() - lock.stat().st_mtime > max_age_h * 3600:
+            return False
+        info = json.loads(lock.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        return True                                   # ancien format : on se fie à l'âge
+    return pid_alive(int(info.get("pid", 0))) if isinstance(info, dict) else True
+
+
+def user_idle_seconds() -> float | None:
+    """Secondes depuis la dernière action clavier/souris sous Windows (None ailleurs)."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+
+        class LASTINPUTINFO(ctypes.Structure):
+            _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+
+        info = LASTINPUTINFO()
+        info.cbSize = ctypes.sizeof(info)
+        if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
+            return None
+        ticks = ctypes.windll.kernel32.GetTickCount() & 0xFFFFFFFF
+        return ((ticks - info.dwTime) & 0xFFFFFFFF) / 1000.0
+    except Exception:
+        return None
+
+
+def setup_logging(log_dir: Path) -> logging.Logger:
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log = logging.getLogger("cor3")
+    log.setLevel(logging.DEBUG)
+    fmt = logging.Formatter("%(asctime)s %(levelname)-7s %(message)s", "%Y-%m-%d %H:%M:%S")
+    fh = logging.FileHandler(log_dir / f"cor3_{dt.date.today():%Y-%m-%d}.log", encoding="utf-8")
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(fmt)
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setLevel(logging.INFO)
+    ch.setFormatter(fmt)
+    log.handlers[:] = [fh, ch]
+    return log
+
+
+class Notifier:
+    def __init__(self, cfg: dict, log: logging.Logger):
+        self.cfg, self.log = cfg, log
+
+    def send(self, title: str, message: str, failure: bool = True) -> None:
+        if not failure and not self.cfg.get("notify_on_success", False):
+            return
+        if self.cfg.get("windows_toast", True) and sys.platform == "win32":
+            self._toast(title, message)
+        if url := self.cfg.get("discord_webhook"):
+            self._post_json(url, {"content": f"**{title}**\n{message}"[:1900]})
+        if topic := self.cfg.get("ntfy_topic"):
+            self._post_raw(f"https://ntfy.sh/{topic}", message.encode(), {"Title": title.encode("ascii", "ignore").decode()})
+
+    def _toast(self, title: str, message: str) -> None:
+        def esc(s: str) -> str:
+            return s.replace("'", "''")[:250]
+        ps = (
+            "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null;"
+            "$t = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02);"
+            "$n = $t.GetElementsByTagName('text');"
+            f"$n.Item(0).AppendChild($t.CreateTextNode('{esc(title)}')) > $null;"
+            f"$n.Item(1).AppendChild($t.CreateTextNode('{esc(message)}')) > $null;"
+            "$id = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe';"
+            "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($id).Show([Windows.UI.Notifications.ToastNotification]::new($t))"
+        )
+        try:
+            subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                           timeout=20, capture_output=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except Exception as exc:  # une alerte ne doit jamais faire planter le script
+            self.log.warning("Notification Windows impossible : %s", exc)
+
+    def _post_json(self, url: str, payload: dict) -> None:
+        self._post_raw(url, json.dumps(payload).encode(), {"Content-Type": "application/json"})
+
+    def _post_raw(self, url: str, body: bytes, headers: dict) -> None:
+        try:
+            req = urllib.request.Request(url, data=body, headers={"User-Agent": "cor3_bot", **headers})
+            urllib.request.urlopen(req, timeout=15).read()
+        except Exception as exc:
+            self.log.warning("Alerte %s impossible : %s", url.split("/")[2], exc)
+
+
+# ---------------------------------------------------------------------------
+# Écoute du WebSocket du jeu (socket.io + msgpack) et des réponses REST utiles
+# ---------------------------------------------------------------------------
+@dataclass
+class WsEvent:
+    seq: int
+    t: float
+    direction: str          # "in" (serveur -> client), "out" ou "rest"
+    room: str | None        # ex. "market", "expeditions", "sai", "session-replaced"
+    action: str | None      # ex. "get.jobs", "respond.event"
+    data: Any
+
+
+def _ext_hook(code: int, data: bytes) -> Any:
+    return msgpack.ExtType(code, data)
+
+
+class GameEvents:
+    def __init__(self, log: logging.Logger):
+        self.log = log
+        self.events: deque[WsEvent] = deque(maxlen=20000)
+        self.seq = 0
+        self.session_lost = False
+        self.frontend_version: str | None = None
+        self.servers: dict[str, dict] = {}      # id -> serveur (carte du réseau, tenu à jour)
+
+    def attach(self, page: Page) -> None:
+        page.on("websocket", self._on_websocket)
+        page.on("response", self._on_response)
+
+    def _on_websocket(self, ws) -> None:
+        if "socket.io" not in ws.url:      # les mini-jeux (Colyseus) ne nous intéressent pas
+            return
+        self.log.debug("WebSocket ouvert : %s", ws.url.split("?")[0])
+        ws.on("framereceived", lambda payload: self._on_frame("in", payload))
+        ws.on("framesent", lambda payload: self._on_frame("out", payload))
+
+    def _on_frame(self, direction: str, payload: Any) -> None:
+        if not isinstance(payload, (bytes, bytearray)):
+            return
+        try:
+            msg = msgpack.unpackb(payload, raw=False, strict_map_key=False, timestamp=3, ext_hook=_ext_hook)
+        except Exception:
+            return
+        if not isinstance(msg, dict):
+            return
+        data = msg.get("data")
+        room, body = None, data
+        if isinstance(data, list) and data:
+            room = data[0] if isinstance(data[0], str) else None
+            body = data[1] if len(data) > 1 else None
+        action, payload_data = None, body
+        if isinstance(body, dict) and isinstance(body.get("event"), dict):
+            action = body["event"].get("action")
+            payload_data = body.get("data")
+        if room == "session-replaced" and direction == "in":
+            self.session_lost = True
+            self.log.error("Le serveur signale « session-replaced » : un autre onglet/appareil a pris la main.")
+        if room == "connected" and isinstance(body, dict):
+            self.frontend_version = body.get("frontendVersion")
+        if room == "network-map" and direction == "in" and isinstance(payload_data, dict):
+            self._merge_map(payload_data)
+        self._push(direction, room, action, payload_data)
+
+    def _merge_map(self, data: dict) -> None:
+        """get.map renvoie un « snapshot », set.endpoint et les mises à jour des « delta »."""
+        state = data.get("state") or {}
+        servers = state.get("servers") or []
+        if data.get("kind") == "snapshot":
+            self.servers = {}
+        for srv in servers:
+            if isinstance(srv, dict) and srv.get("id"):
+                self.servers[srv["id"]] = {**self.servers.get(srv["id"], {}), **srv}
+
+    def server(self, name: str) -> dict | None:
+        return next((s for s in self.servers.values() if s.get("serverName") == name), None)
+
+    def endpoint(self) -> str | None:
+        return next((s.get("serverName") for s in self.servers.values() if s.get("isEndpoint")), None)
+
+    def _on_response(self, resp) -> None:
+        if "/api/user-daily-claim" in resp.url:
+            path = urllib.parse.urlparse(resp.url).path
+            self._push("rest", path, resp.request.method, {"status": resp.status, "response": resp})
+
+    def _push(self, direction: str, room: str | None, action: str | None, data: Any) -> None:
+        self.seq += 1
+        self.events.append(WsEvent(self.seq, time.time(), direction, room, action, data))
+
+    def mark(self) -> int:
+        return self.seq
+
+    def find(self, since: int = 0, room: str | None = None, action: str | None = None,
+             direction: str = "in", pred: Callable[[WsEvent], bool] | None = None) -> list[WsEvent]:
+        return [e for e in list(self.events)
+                if e.seq > since and e.direction == direction
+                and (room is None or e.room == room) and (action is None or e.action == action)
+                and (pred is None or pred(e))]
+
+    def last(self, room: str | None = None, action: str | None = None, direction: str = "in",
+             since: int = 0) -> WsEvent | None:
+        found = self.find(since, room, action, direction)
+        return found[-1] if found else None
+
+
+# ---------------------------------------------------------------------------
+# Script injecté pour lire le mur ICE WALL (SVG) : glyphes cibles + cellules
+# ---------------------------------------------------------------------------
+ICE_WALL_JS = r"""
+() => {
+  const iw = document.querySelector('[data-sentry-component="IceWallBreakApplication"]');
+  if (!iw) return null;
+  const tp = iw.querySelector('[data-sentry-component="TargetPreview"]');
+  const wb = iw.querySelector('[data-sentry-component="WallBoard"]');
+  const sig = g => [...g.querySelectorAll('path')]
+      .filter(p => p.getAttribute('fill-opacity') !== '0.2')
+      .map(p => (p.getAttribute('d') || '').replace(/\s+/g, ' ')).sort().join('|');
+  const tr = s => { const m = /translate\(\s*([-\d.]+)[ ,]+([-\d.]+)\)/.exec(s || ''); return m ? [+m[1], +m[2]] : [NaN, NaN]; };
+  const targets = tp ? [...tp.children].filter(c => c.tagName.toLowerCase() === 'g').map(g => {
+      const t = g.getAttribute('transform') || ''; const [x, y] = tr(t);
+      return {sig: sig(g), x, y, flip: /scale/.test(t)}; }) : [];
+  const layer = wb ? wb.querySelector(':scope > g') : null;
+  const cells = layer ? [...layer.children].map((c, i) => {
+      const inner = c.firstElementChild; const t = inner ? (inner.getAttribute('transform') || '') : '';
+      const [x, y] = tr(t); const r = c.getBoundingClientRect(); const flip = /scale/.test(t);
+      return {index: i, sig: inner ? sig(inner) : '', x, y, flip,
+              npath: inner ? inner.querySelectorAll('path').length : 0,
+              cx: r.x + r.width / 2, cy: r.y + r.height * (flip ? 1 / 3 : 2 / 3),
+              cls: String(c.className && c.className.baseVal !== undefined ? c.className.baseVal : c.className),
+              opacity: getComputedStyle(c).opacity}; }) : [];
+  const m = iw.innerText.match(/(\d+)\s*\/\s*(\d+)/);
+  return {targets, cells, done: m ? +m[1] : null, total: m ? +m[2] : null,
+          limit: /daily limit reached|limite quotidienne/i.test(iw.innerText)};
+}
+"""
+
+
+# ---------------------------------------------------------------------------
+# Le bot
+# ---------------------------------------------------------------------------
+class Bot:
+    def __init__(self, page: Page, cfg: dict, log: logging.Logger, events: GameEvents, dry_run: bool,
+                 state: "State | None" = None):
+        self.page, self.cfg, self.log, self.events, self.dry_run = page, cfg, log, events, dry_run
+        self.state = state
+        self.auto_mode = False          # --auto : ne visiter que les marchés dont le minuteur est échu
+        self.debug_dir = Path(cfg["general"].get("log_dir", ROOT / "logs")) / "debug"
+        self._market_name: str | None = None
+        self._original_endpoint: str | None = None
+        self._current_preset: str | None = None
+
+    # ----- outils génériques -------------------------------------------------
+    def check_session(self) -> None:
+        if self.events.session_lost:
+            raise SessionLost("session reprise par un autre onglet ou appareil")
+
+    def pause(self, ms: int) -> None:
+        self.page.wait_for_timeout(ms)
+        self.check_session()
+
+    def wait_event(self, room: str | None, action: str | None, since: int, timeout: float = 15,
+                   pred: Callable[[WsEvent], bool] | None = None, direction: str = "in") -> WsEvent:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            found = self.events.find(since, room, action, direction, pred)
+            if found:
+                return found[-1]
+            self.pause(150)
+        raise StepFailed(f"pas de réponse serveur « {room}:{action} » en {timeout:.0f} s")
+
+    def window(self, inner: str) -> Locator:
+        return self.page.locator(WINDOW).filter(has=self.page.locator(inner))
+
+    def close_window(self, inner: str) -> None:
+        win = self.window(inner)
+        for _ in range(win.count()):
+            try:
+                win.first.locator(CLOSE_BTN).first.click(timeout=3000)
+                self.pause(300)
+            except PWError:
+                break
+
+    def close_all_windows(self) -> None:
+        for _ in range(12):
+            btn = self.page.locator(f"{WINDOW} {CLOSE_BTN}")
+            if not btn.count():
+                return
+            try:
+                btn.last.click(timeout=3000)
+            except PWError:
+                return
+            self.pause(250)
+
+    def dock(self, key: str) -> None:
+        self.page.locator(f'[data-onboarding-300-id="{DOCK[key]}"]').click()
+        self.pause(600)
+
+    def button(self, scope: Locator | Page, key_or_pattern: str) -> Locator:
+        pattern = TXT.get(key_or_pattern, key_or_pattern)
+        return scope.get_by_role("button", name=rx(pattern))
+
+    def safe_click(self, target: Locator, timeout: float = 5000) -> None:
+        """Clic normal ; si l'élément est caché par une autre fenêtre ou hors de la zone visible de la
+        carte, clic DOM direct (React le reçoit pareil)."""
+        try:
+            target.click(timeout=timeout)
+        except PWError:
+            self.log.debug("Clic bloqué (fenêtre devant ou hors champ) : clic DOM à la place")
+            target.dispatch_event("click")
+
+    def allowed(self, what: str) -> bool:
+        """Point de passage obligatoire avant toute validation (mode simulation)."""
+        if self.dry_run:
+            self.log.info("[SIMULATION] je m'arrête avant : %s", what)
+            return False
+        self.log.info("Action : %s", what)
+        return True
+
+    def snapshot(self, label: str) -> None:
+        """Capture d'écran + HTML pour diagnostiquer un écran qui a changé."""
+        try:
+            self.debug_dir.mkdir(parents=True, exist_ok=True)
+            stamp = f"{dt.datetime.now():%Y%m%d_%H%M%S}_{re.sub(r'[^a-z0-9]+', '_', label.lower())}"
+            self.page.screenshot(path=str(self.debug_dir / f"{stamp}.png"))
+            (self.debug_dir / f"{stamp}.html").write_text(self.page.content(), encoding="utf-8")
+            self.log.info("Diagnostic enregistré : debug/%s.(png|html)", stamp)
+        except Exception as exc:
+            self.log.warning("Diagnostic impossible : %s", exc)
+
+    def balance(self) -> int | None:
+        ev = self.events.last("profile", "get.credits") or self.events.last("profile", "receive.credits")
+        if ev and isinstance(ev.data, dict):
+            return ev.data.get("balance", ev.data.get("newBalance"))
+        return None
+
+    # ----- démarrage -------------------------------------------------------------
+    def open_game(self) -> None:
+        self.log.info("Ouverture de %s", GAME_URL)
+        self.page.goto(GAME_URL, wait_until="domcontentloaded", timeout=60000)
+        dock = self.page.locator(f'[data-onboarding-300-id="{DOCK["game_center"]}"]')
+        try:
+            dock.wait_for(timeout=90000)
+        except PWTimeout:
+            if self.page.locator("input[type=email], input[type=password]").count():
+                raise LoginRequired("profil non connecté : lance `python cor3_bot.py --login`")
+            self.snapshot("bureau_introuvable")
+            raise StepFailed("le bureau du jeu ne s'est pas affiché")
+        self.wait_event("connected", None, 0, timeout=45)
+        version = self.events.frontend_version
+        self.log.info("Connecté au serveur temps réel (frontend %s)", version)
+        if version and version != TESTED_FRONTEND:
+            self.log.warning("Version du jeu %s différente de celle testée (%s) : surveille le journal.",
+                             version, TESTED_FRONTEND)
+        self.close_all_windows()
+
+    def ensure_connected(self) -> None:
+        self.check_session()
+        label = self.page.get_by_text(rx(r"Terminal local|Local Terminal")).first
+        if label.count():
+            bar = label.locator("xpath=..").inner_text()
+            if re.search(TXT["disconnected"], bar):
+                raise SessionLost("terminal local DÉCONNECTÉ (session ouverte ailleurs ?)")
+
+    # =========================================================================
+    # 1. Daily tasks
+    # =========================================================================
+    def run_daily(self) -> str:
+        self.ensure_connected()
+        self.close_all_windows()
+        mark = self.events.mark()
+        self.dock("game_center")
+        gc = self.window(comp("GameCenterApplication"))
+        gc.wait_for(timeout=15000)
+        title = gc.get_by_text(rx(TXT["daily_card"])).first
+        card = title.locator("xpath=ancestor::div[.//*[normalize-space()='Open Module']][1]")
+        card.get_by_text(rx(TXT["open_module"])).click()
+        main = self.window(comp("DailyOpsMainScreen"))
+        main.wait_for(timeout=15000)
+
+        state = self._daily_state(mark)
+        self.log.info("Daily : jeu=%s, série=%s, difficulté=%s, déjà faite=%s",
+                      state.get("currentGameId"), state.get("currentStreak"),
+                      state.get("difficulty"), state.get("hasClaimedToday"))
+        if state.get("hasClaimedToday"):
+            self.close_all_windows()
+            if self.state is not None:
+                self.state.mark_daily_done()
+            return "déjà faite aujourd'hui"
+
+        start = main.locator(comp("DailyOpsStartButton"))
+        if not start.count():
+            start = main.get_by_role("button").last
+        start.click()
+        self.pause(1500)
+
+        if state.get("currentGameId") == APP_SIGNAL_DECODE or self.window(cname(f"Application-{APP_SIGNAL_DECODE}")).count():
+            result = self.solve_signal_decode(state.get("difficulty"))
+        else:
+            result = self.solve_log_integrity()
+        self.close_all_windows()
+        if self.state is not None and not result.startswith("simulation"):
+            self.state.mark_daily_done()
+        return result
+
+    def _daily_state(self, since: int) -> dict:
+        """État de la daily (GET /api/user-daily-claim lu au passage, sans rejouer l'appel)."""
+        try:
+            ev = self.wait_event("/api/user-daily-claim", "GET", since, timeout=12, direction="rest")
+        except StepFailed:
+            ev = self.events.last("/api/user-daily-claim", "GET", direction="rest")
+        if ev is not None:
+            try:
+                return ev.data["response"].json()
+            except Exception as exc:
+                self.log.warning("Réponse daily illisible (%s) : je lis l'écran", exc)
+        text = self.window(comp("DailyOpsMainScreen")).inner_text()
+        done = bool(re.search(r"Toutes les tâches sont terminées|All tasks (are )?(completed|done)", text, re.I))
+        game = APP_SIGNAL_DECODE if re.search(r"Décodage du signal|Signal Decode", text, re.I) else None
+        return {"hasClaimedToday": done, "currentGameId": game, "difficulty": None, "currentStreak": None}
+
+    def _wait_claim(self, since: int) -> None:
+        ev = self.wait_event("/api/user-daily-claim", "POST", since, timeout=20, direction="rest")
+        status = ev.data["status"]
+        if status not in (200, 201):
+            raise StepFailed(f"le serveur a refusé la validation de la daily (HTTP {status})")
+        body = ev.data["response"].json()
+        self.log.info("Daily validée : série=%s, prochaine tâche %s", body.get("currentStreak"), body.get("nextTaskTime"))
+
+    # ----- Signal Decode -----------------------------------------------------
+    def solve_signal_decode(self, difficulty: str | None) -> str:
+        win = self.window(cname(f"Application-{APP_SIGNAL_DECODE}"))
+        win.wait_for(timeout=15000)
+        code_length = CODE_LENGTH_BY_DIFFICULTY.get(difficulty or "")
+        for attempt in range(1, 4):
+            get_signal = self.button(win, r"^\s*Get Signal\s*$")
+            if get_signal.count():
+                get_signal.click()
+            groups = win.locator(".pulse-timeline .pulse-group")
+            groups.first.wait_for(timeout=10000)
+            pulses = groups.evaluate_all(
+                "gs => gs.map(g => g.querySelector('.pulse-bar')?.classList.contains('long') ? 'L' : 'S').join('')")
+            try:
+                encoding, code = decode_signal(pulses, code_length=code_length)
+            except SignalError as exc:
+                self.log.warning("Signal ambigu (%s) : je ferme et je relance (essai %d)", exc, attempt)
+                self.close_window(cname(f"Application-{APP_SIGNAL_DECODE}"))
+                self.window(comp("DailyOpsMainScreen")).locator(comp("DailyOpsStartButton")).click()
+                win.wait_for(timeout=15000)
+                continue
+            self.log.info("Signal %s (%d impulsions) -> %s : %s", pulses, len(pulses), encoding, code)
+
+            win.locator(".next-button").click()                                   # Select Encoding
+            win.locator(".encoding-option").filter(has_text=rx("Morse" if encoding == "morse" else "Binary")).click()
+            win.locator(".next-button").click()                                   # Decode Signal
+            field = win.locator("input.code-input")
+            field.wait_for(timeout=10000)
+            maxlen = int(field.get_attribute("maxlength") or 0)
+            rows = win.locator(".encoding-table-full .table-row").evaluate_all(
+                "rs => rs.map(r => [r.querySelector('.pulses').textContent.replace(/[^SL]/g, ''),"
+                " r.querySelector('.digit').textContent.replace(/[^0-9]/g, '')])")
+            table = {p: d for p, d in rows if p and d}
+            _, check = decode_signal(pulses, code_length=maxlen or None,
+                                     morse_table=table if encoding == "morse" else None,
+                                     binary_table=table if encoding == "binary" else None)
+            if check != code or (maxlen and len(code) != maxlen):
+                self.snapshot("signal_incoherent")
+                raise StepFailed(f"code {code} incohérent avec la page (table -> {check}, longueur {maxlen})")
+            field.fill(code)
+            if not self.allowed(f"Signal Decode : valider le code {code}"):
+                return f"simulation : code {code}"
+            mark = self.events.mark()
+            win.locator(".submit-button").click()
+            try:
+                win.locator(".result-screen").wait_for(timeout=8000)
+            except PWTimeout:
+                self.log.warning("Code refusé, nouveau signal (essai %d)", attempt)
+                continue
+            self._wait_claim(mark)
+            return f"Signal Decode réussi ({code})"
+        raise StepFailed("Signal Decode : 3 essais sans succès")
+
+    # ----- System Log Integrity ---------------------------------------------
+    # Écran non disponible le jour de l'inspection : sélecteurs tirés du code du
+    # jeu et du guide. Lance une fois en --dry-run quand cette daily tombe.
+    def solve_log_integrity(self) -> str:
+        win = self.page.locator(WINDOW).filter(
+            has=self.page.locator(f"{comp('GameWaitingScreen')}, .game-container")
+        ).filter(has_not=self.page.locator(f"{comp('DailyOpsMainScreen')}, .signal-display")).last
+        win.wait_for(timeout=15000)
+        for attempt in range(1, 4):
+            intro = win.locator('[data-sentry-element="GameWaitingScreenGameActionButtonStyled"]')
+            if intro.count():
+                intro.first.click()
+            entries = win.locator(".log-entries .log-entry")
+            try:
+                entries.first.wait_for(timeout=4000)
+            except PWTimeout:                       # écran d'accueil propre au mini-jeu (« Press START »)
+                start = self.button(win, r"^\s*(Start|Start scan|Scan|Démarrer|Lancer)\b.*$")
+                if start.count():
+                    start.first.click()
+                entries.first.wait_for(timeout=20000)
+            previous = -1
+            for _ in range(40):                     # les lignes s'affichent une par une
+                count = entries.count()
+                if count == previous and not win.locator(".scanning-animation").count():
+                    break
+                previous = count
+                self.pause(250)
+            lines = [self._log_text(t) for t in entries.all_inner_texts()]
+            expected = 2
+            m = re.search(r"Select (\d+) log entr", win.inner_text())
+            if m:
+                expected = int(m.group(1))
+            invalid = {i: analyse_log_line(line) for i, line in enumerate(lines)}
+            invalid = {i: e for i, e in invalid.items() if e}
+            self.log.info("Logs : %d lignes, %d invalides attendues -> %s", len(lines), expected,
+                          {lines[i]: sorted(e) for i, e in invalid.items()})
+            if len(invalid) != expected:
+                self.snapshot("log_integrity_comptage")
+                raise StepFailed(f"{len(invalid)} ligne(s) invalide(s) trouvée(s) au lieu de {expected}")
+            for i in invalid:
+                entries.nth(i).click()
+                self.pause(150)
+            self.button(win, r"^\s*Confirm Selection\s*$").click()
+
+            blocks = win.locator(".error-analysis-block")
+            blocks.first.wait_for(timeout=10000)
+            for b in range(blocks.count()):
+                block = blocks.nth(b)
+                line = self._log_text(block.locator(".log-line-display").inner_text())
+                errors = analyse_log_line(line)
+                block.locator(".fix-error-button").click()
+                for err in errors:
+                    block.locator(".error-type-button").filter(has_text=ERROR_LABELS[err]).first.click()
+                    self.pause(120)
+                self.log.info("Correction : %s -> %s", line, sorted(errors))
+            if not self.allowed("System Log Integrity : confirmer les corrections et relancer le scan"):
+                return "simulation : corrections préparées"
+            mark = self.events.mark()
+            self.button(win, r"^\s*Confirm Fixes\s*$").click()
+            self.pause(800)
+            self.button(win, r"Re-?scan").click()
+            win.locator(".result-screen").wait_for(timeout=15000)
+            if win.locator(".result-screen.success").count():
+                self._wait_claim(mark)
+                return "System Log Integrity réussi"
+            self.log.warning("Scan refusé (essai %d) : nouvelle tentative", attempt)
+            self.snapshot("log_integrity_echec")
+            retry = win.locator(".retry-button")
+            if retry.count():
+                retry.click()
+        raise StepFailed("System Log Integrity : 3 essais sans succès")
+
+    @staticmethod
+    def _log_text(text: str) -> str:
+        m = re.search(r"\[[^\]]*\].*", text.replace("\n", " "))
+        return (m.group(0) if m else text).strip()
+
+    # =========================================================================
+    # 2. Carte du réseau, marchés et jobs
+    # =========================================================================
+    def open_network_map(self) -> Locator:
+        nm = self.window(comp("NetworkMapApplication"))
+        if not nm.count():
+            mark = self.events.mark()
+            self.dock("network_map")
+            nm.wait_for(timeout=15000)
+            try:
+                self.wait_event("network-map", "get.map", mark, timeout=15)
+            except StepFailed:
+                self.log.warning("Carte du réseau : état des serveurs non reçu")
+        nm.wait_for(timeout=15000)
+        return nm
+
+    def select_server(self, name: str) -> Locator:
+        nm = self.open_network_map()
+        node = self.page.locator(f'[data-onboarding-300-id="ServerItem-{name}"]')
+        if not node.count():
+            raise Unavailable(f"{name} absent de la carte (pas encore découvert ?)",
+                              utc_now() + dt.timedelta(hours=12))
+        self.safe_click(node.first)
+        self.pause(500)
+        return nm
+
+    def check_server(self, name: str) -> dict:
+        """État du serveur d'après la carte (get.map + deltas). Maintenance -> Unavailable."""
+        srv = self.events.server(name) or {}
+        if srv.get("isInMaintenance"):
+            ends = parse_time(srv.get("maintenanceEndsAt"))
+            raise Unavailable(f"{name} en maintenance jusqu'à {local_time(ends)}",
+                              ends + dt.timedelta(minutes=2) if ends else None)
+        return srv
+
+    def _route_cut(self, name: str) -> Unavailable:
+        return Unavailable(f"{name} injoignable : un nœud de la route est sans doute en maintenance")
+
+    def ensure_reachable(self, name: str) -> Locator:
+        """Sélectionne un serveur et s'y connecte (« Connecter » déplace le point de sortie :
+        network-map:set.endpoint). Maintenance ou route coupée -> Unavailable : on réessaiera."""
+        nm = self.select_server(name)
+        self.check_server(name)
+        connect = self.button(nm, "connect")
+        if connect.count():
+            if not connect.first.is_enabled():
+                if (self.events.server(name) or {}).get("isReachable") is False:
+                    raise self._route_cut(name)
+                raise StepFailed(f"bouton Connecter inactif sur {name}")
+            if self._original_endpoint is None:
+                self._original_endpoint = self.events.endpoint() or ""
+            mark = self.events.mark()
+            self.safe_click(connect.first)
+            try:
+                self.wait_event("network-map", "set.endpoint", mark, timeout=15)
+            except StepFailed:
+                self.check_server(name)
+                if (self.events.server(name) or {}).get("isReachable") is False:
+                    raise self._route_cut(name)
+                raise StepFailed(f"connexion à {name} sans réponse du serveur")
+            self.pause(500)
+        srv = self.check_server(name)
+        if srv.get("isReachable") is False:
+            raise self._route_cut(name)
+        return nm
+
+    def restore_endpoint(self) -> None:
+        """Remet le point de sortie que le joueur avait avant le passage du bot."""
+        name, self._original_endpoint = self._original_endpoint, None
+        if not name or self.events.endpoint() == name:
+            return
+        try:
+            self.close_window(comp("MarketSite"))
+            self._market_name = None
+            nm = self.select_server(name)
+            connect = self.button(nm, "connect")
+            if connect.count() and connect.first.is_enabled():
+                mark = self.events.mark()
+                self.safe_click(connect.first)
+                self.wait_event("network-map", "set.endpoint", mark, timeout=15)
+                self.log.info("Point de sortie remis sur %s", name)
+        except Exception as exc:
+            self.log.warning("Impossible de remettre le point de sortie %s : %s", name, exc)
+
+    def open_market(self, name: str = HOME_SERVER) -> Locator:
+        """Ouvre le site Marché d'un serveur. Home Server : bouton « Marché » du panneau.
+        Marchés distants (D4RK RM7MI, SRM7-M, URM7-M) : il faut d'abord s'y connecter, puis
+        cliquer l'icône MarketIconButton."""
+        market = self.window(comp("MarketSite"))
+        if market.count() and self._market_name == name and (
+                name == HOME_SERVER or self.events.endpoint() == name):
+            return market
+        self.close_window(comp("MarketSite"))
+        self._market_name = None
+        nm = self.select_server(name)
+        self.check_server(name)
+        text_btn = self.button(nm, "market")
+        if not text_btn.count():
+            nm = self.ensure_reachable(name)
+            text_btn = self.button(nm, "market")
+        icon = f'{cname("MarketIconButton")} button'
+        candidates = [self.page.locator(f'[data-onboarding-300-id="ServerItem-{name}"] {icon}'),
+                      nm.locator(icon), self.page.locator(icon)]
+        icon_btn = next((c for c in candidates if c.count()), candidates[-1])
+        mark = self.events.mark()
+        if text_btn.count():
+            self.safe_click(text_btn.first)
+        elif icon_btn.count():
+            self.safe_click(icon_btn.first)
+        else:
+            raise StepFailed(f"pas de bouton Marché sur {name}")
+        market.wait_for(timeout=15000)
+        try:
+            opts = self.wait_event("market", "get.options", mark, timeout=15).data
+            expected = (self.events.server(name) or {}).get("marketId")
+            if isinstance(opts, dict) and expected and opts.get("marketId") not in (None, expected):
+                raise StepFailed(f"le marché ouvert n'est pas celui de {name}")
+        except StepFailed as exc:
+            if "n'est pas celui" in str(exc):
+                raise
+            self.log.warning("Marché %s : options non reçues", name)
+        self._market_name = name
+        return market
+
+    def market_tab(self, market: Locator, key: str) -> None:
+        market.locator(comp("MarketNav")).get_by_role("button", name=rx(TXT[key])).first.click()
+        self.pause(800)
+
+    def load_jobs(self, market: Locator, name: str | None = None) -> dict:
+        """Onglet Contrats. L'ouvrir après l'échéance du minuteur relance la liste et le minuteur ;
+        recliquer l'onglet rafraîchit la liste (astuce du guide)."""
+        name = name or self._market_name or HOME_SERVER
+        data: dict = {}
+        for attempt in (1, 2):
+            mark = self.events.mark()
+            self.market_tab(market, "contracts")
+            data = self.wait_event("market", "get.jobs", mark, timeout=15).data or {}
+            reset = parse_time(data.get("nextJobsResetAt"))
+            if reset is None or reset > utc_now() or attempt == 2:
+                break
+            self.log.info("Marché %s : minuteur échu (%s), je recharge les contrats", name, local_time(reset))
+            self.pause(1500)
+        for job in (data.get("jobs") or []) + (data.get("recentJobs") or []):
+            job["_market"] = name
+        if self.state is not None:
+            self.state.set_market_reset(name, data.get("nextJobsResetAt"))
+        taken = sum(1 for j in data.get("recentJobs") or [] if j.get("status") == "TAKEN")
+        self.log.info("Marché %s : %d contrat(s) proposé(s), %d signé(s) en cours, renouvellement %s",
+                      name, len(data.get("jobs") or []), taken, local_time(data.get("nextJobsResetAt")))
+        if data.get("jobs") or data.get("recentJobs"):
+            market.locator(comp("JobCard")).first.wait_for(timeout=10000)
+        return data
+
+    def visit_market(self, name: str, notes: list[str], failed: list[str]) -> dict | None:
+        """Ouvre un marché et ses contrats ; range l'indisponibilité dans notes, le reste dans failed."""
+        try:
+            return self.load_jobs(self.open_market(name), name)
+        except Unavailable as exc:
+            notes.append(f"marché {name} : {exc}")
+            self.log.warning("Marché %s indisponible : %s", name, exc)
+            if self.state is not None:
+                self.state.set_market_retry(name, exc.retry_at, str(exc))
+        except (StepFailed, PWTimeout) as exc:
+            failed.append(f"marché {name} : {exc}")
+            self.log.warning("Marché %s : %s", name, exc)
+            self.snapshot(f"marche_{name}")
+            self.close_window(comp("MarketSite"))
+            self._market_name = None
+        return None
+
+    def run_markets(self, only_due: bool | None = None) -> str:
+        """Relance le minuteur des marchés échus (ouvre leur onglet Contrats), sans signer de job."""
+        only_due = True if only_due is None else only_due
+        names = [n for n in market_names(self.cfg)
+                 if not only_due or self.state is None or self.state.market_due(n)]
+        if not names:
+            return "aucun minuteur de marché échu"
+        self.ensure_connected()
+        self.close_all_windows()
+        refreshed: list[str] = []
+        notes: list[str] = []
+        failed: list[str] = []
+        try:
+            for name in names:
+                data = self.visit_market(name, notes, failed)
+                if data is not None:
+                    refreshed.append(f"{name} ({len(data.get('jobs') or [])} contrats, "
+                                     f"prochain renouvellement {local_time(data.get('nextJobsResetAt'))})")
+        finally:
+            self.cleanup()
+        summary = ("marchés relancés : " + " | ".join(refreshed)) if refreshed else "aucun marché relancé"
+        if notes:
+            summary += " ; " + " | ".join(notes)
+        if failed:
+            raise StepFailed(summary + " ; échecs : " + " | ".join(failed))
+        return summary
+
+    def cleanup(self) -> None:
+        """Remet le loadout et le point de sortie du joueur, ferme les fenêtres (sans jamais planter)."""
+        for step in (self.restore_preset, self.restore_endpoint, self.close_all_windows):
+            try:
+                step()
+            except (SessionLost, LoginRequired):
+                raise
+            except Exception as exc:
+                self.log.warning("Remise en ordre (%s) impossible : %s", step.__name__, exc)
+
+    @staticmethod
+    def job_details(job: dict) -> dict:
+        """Fusionne les « details » des conditions (IP, fichiers, logs ciblés)."""
+        merged: dict = {}
+        for item in (job.get("conditions") or {}).get("items") or []:
+            if isinstance(item.get("details"), dict):
+                merged.update(item["details"])
+        return merged
+
+    @staticmethod
+    def job_server(job: dict) -> str | None:
+        servers = job.get("relatedServers") or []
+        return servers[0].get("serverName") if servers else None
+
+    def find_job_card(self, market: Locator, job: dict) -> Locator:
+        """Retrouve la carte d'un job (les cartes n'exposent pas l'id) : nom + serveur + gains.
+        Les jobs signés n'affichent que « Temps restant / EN COURS » : on déplie pour voir le serveur."""
+        server = self.job_server(job) or "N/A"
+        cr = f"{job.get('rewardCredits', 0):,}"
+        taken = job.get("status") == "TAKEN"
+        corp = job.get("corporation")
+        cards = market.locator(comp("JobCard"))
+        for i in range(cards.count()):
+            card = cards.nth(i)
+            text = card.inner_text()
+            if job["name"] not in text:
+                continue
+            is_running = bool(re.search(f"{TXT['in_progress']}|{TXT['ready']}", text, re.I))
+            if taken != is_running:
+                continue
+            if not taken and cr not in text:
+                continue
+            if server not in text or (corp and corp not in text):
+                more = self.button(card, "read_more")
+                if more.count():
+                    more.first.click()
+                    self.pause(400)
+                    text = card.inner_text()
+            if server in text and (not corp or corp in text):
+                return card
+        raise StepFailed(f"carte introuvable pour le job {job['name']} ({server})")
+
+    def sign_job(self, market: Locator, job: dict) -> None:
+        self.close_window(comp("ServerAdministrationInterfaceApplication"))   # règle du guide
+        card = self.find_job_card(market, job)
+        more = self.button(card, "read_more")
+        if more.count():
+            more.click()
+            self.pause(400)
+        self.button(card, "sign").first.click()
+        side = self.page.locator(cname("JobSideout"))
+        side.wait_for(timeout=8000)
+        text = side.inner_text()
+        if job.get("corporation") and job["corporation"] not in text:
+            self.button(side, r"^\s*(Annuler|Cancel)\s*$").click()
+            raise StepFailed("le panneau de signature ne correspond pas au job attendu")
+        if not self.allowed(f"signer le job {job['name']} ({self.job_server(job) or '-'}, "
+                            f"{job.get('rewardCredits')} CR, dépôt {job.get('deposit', 0)} CR)"):
+            self.button(side, r"^\s*(Annuler|Cancel)\s*$").click()
+            return
+        mark = self.events.mark()
+        self.button(side, "sign").click()
+        ev = self.wait_event("market", "job.take", mark, timeout=15)
+        if (ev.data or {}).get("status") != "ok":
+            raise StepFailed(f"signature refusée : {ev.data}")
+
+    def complete_job(self, market_name: str, job: dict) -> None:
+        market = self.open_market(market_name)
+        current = job
+        for attempt in (1, 2):
+            jobs = self.load_jobs(market, market_name)
+            current = next((j for j in jobs.get("recentJobs", []) if j.get("id") == job.get("id")), job)
+            if current.get("canComplete") is not False or self.dry_run or attempt == 2:
+                break
+            self.pause(2500)                       # le serveur valide parfois avec un temps de retard
+        if current.get("status") == "TAKEN" and current.get("canComplete") is False and not self.dry_run:
+            raise StepFailed(f"le job {current['name']} n'est pas encore validé par le serveur")
+        card = self.find_job_card(market, current)
+        more = self.button(card, "read_more")
+        if more.count():
+            more.click()
+            self.pause(400)
+        card.locator(comp("Button")).last.click()                           # bouton « Infos »
+        side = self.page.locator(cname("JobSideout"))
+        side.wait_for(timeout=8000)
+        if not self.allowed(f"terminer le job {current['name']} ({market_name})"):
+            return
+        mark = self.events.mark()
+        self.button(side, "complete").click()
+        ev = self.wait_event("market", "job.complete", mark, timeout=15)
+        if (ev.data or {}).get("status") != "ok":
+            raise StepFailed(f"fin de job refusée : {ev.data}")
+        self.log.info("Job terminé : %s sur %s (+%s CR, +%s REP)", current["name"], market_name,
+                      current.get("rewardCredits"), current.get("rewardReputation"))
+
+    def run_jobs(self, only_due: bool | None = None) -> str:
+        """Pour chaque marché (config [markets] names) : ouvre l'onglet Contrats (ce qui relance son
+        minuteur), termine les jobs déjà signés, puis signe et fait de nouveaux jobs selon la politique.
+        En mode --auto, seuls les marchés dont le minuteur est échu sont visités."""
+        only_due = self.auto_mode if only_due is None else only_due
+        jcfg = self.cfg["jobs"]
+        names = [n for n in market_names(self.cfg)
+                 if not only_due or self.state is None or self.state.market_due(n)]
+        if not names:
+            return "aucun minuteur de marché échu"
+        take_on = set(jcfg.get("markets") or market_names(self.cfg))
+        budget = int(jcfg.get("max_jobs_per_run", 3))
+        self.ensure_connected()
+        self.close_all_windows()
+        done: list[str] = []
+        failed: list[str] = []      # échecs : déclenchent une alerte
+        notes: list[str] = []       # laissé de côté volontairement ou indisponible pour l'instant
+        seen: list[str] = []
+        handled: set = set()
+        try:
+            for name in names:
+                data = self.visit_market(name, notes, failed)
+                if data is None:
+                    continue
+                seen.append(name)
+                # a) jobs déjà signés : terminer ceux qui sont prêts, faire les autres
+                for job in data.get("recentJobs") or []:
+                    if job.get("status") != "TAKEN" or job.get("id") in handled:
+                        continue
+                    handled.add(job.get("id"))
+                    reason = self.job_type_refusal(job) or self.server_problem(job)
+                    if reason and not job.get("canComplete"):
+                        notes.append(f"{job['name']} ({name}, signé) laissé de côté : {reason}")
+                        self.log.warning("Job signé laissé de côté : %s (%s) : %s", job["name"], name, reason)
+                        continue
+                    try:
+                        if not job.get("canComplete"):
+                            self.perform_job(job)
+                        self.complete_job(name, job)
+                        done.append(f"{job['name']} ({name})")
+                    except (StepFailed, PWTimeout) as exc:      # maintenance : on réessaiera plus tard
+                        self._job_error(exc, f"{job['name']} ({name}, signé)", job, notes, failed, soft=True)
+                # b) nouveaux jobs selon la politique
+                if name not in take_on:
+                    continue
+                for job in sorted(data.get("jobs") or [], key=lambda j: -int(j.get("rewardCredits", 0) or 0)):
+                    if budget <= 0:
+                        break
+                    if job.get("id") in handled:
+                        continue
+                    reason = self.job_refusal_reason(job)
+                    if reason:
+                        self.log.debug("Job ignoré %s (%s, %s) : %s", job["name"], name, self.job_server(job), reason)
+                        continue
+                    handled.add(job.get("id"))
+                    try:
+                        self.sign_job(self.open_market(name), job)
+                        budget -= 1                 # compté dès la signature, même si la suite échoue
+                        if self.dry_run:
+                            continue
+                        recent = self.load_jobs(self.open_market(name), name).get("recentJobs") or []
+                        taken = next((j for j in recent if j.get("id") == job.get("id")), job)
+                        self.perform_job(taken)
+                        self.complete_job(name, taken)
+                        done.append(f"{job['name']} ({name})")
+                    except (StepFailed, PWTimeout) as exc:
+                        self._job_error(exc, f"{job['name']} ({name})", job, notes, failed, soft=False)
+        finally:
+            self.cleanup()
+        summary = f"{len(done)} job(s) terminé(s)"
+        if done:
+            summary += " : " + ", ".join(done)
+        summary += f" ; marchés vus : {', '.join(seen) or 'aucun'}"
+        if notes:
+            summary += " ; " + " | ".join(notes)
+        if failed:
+            summary += f" ; {len(failed)} en échec : " + " | ".join(failed)
+            raise StepFailed(summary)
+        return summary
+
+    def _job_error(self, exc: Exception, label: str, job: dict, notes: list[str], failed: list[str],
+                   soft: bool) -> None:
+        """Simulation (et indisponibilité d'un job déjà signé) -> note ; le reste -> échec + alerte."""
+        if isinstance(exc, Simulated) or (soft and isinstance(exc, Unavailable)):
+            notes.append(f"{label} : {exc}")
+            self.log.warning("Job %s : %s", label, exc)
+            return
+        failed.append(f"{label} : {exc}")
+        self.log.warning("Job %s en échec : %s", label, exc)
+        self.snapshot(f"job_{job.get('jobType')}")
+
+    def job_type_refusal(self, job: dict) -> str | None:
+        """Le type de job est-il autorisé par la config ? (vaut aussi pour les jobs déjà signés)"""
+        jcfg = self.cfg["jobs"]
+        jtype = job.get("jobType", "")
+        allowed = set(jcfg.get("types", ["DecryptFile", "DownloadLog", "DownloadFile"]))
+        if jtype in {"DeleteIps", "DeleteLog", "DeleteFile"}:
+            if not jcfg.get("allow_deletions", False):
+                return "suppression non autorisée (allow_deletions = false)"
+            allowed.add(jtype)
+        if jtype == "AddIps":
+            if not jcfg.get("allow_ip_add", False):
+                return "ajout d'IP non autorisé (allow_ip_add = false)"
+            allowed.add(jtype)
+        if jtype not in allowed:
+            return f"type {jtype} non géré ou non autorisé"
+        return None
+
+    def job_refusal_reason(self, job: dict) -> str | None:
+        jcfg = self.cfg["jobs"]
+        if reason := self.job_type_refusal(job):
+            return reason
+        if int(job.get("deposit", 0) or 0) > int(jcfg.get("max_deposit_cr", 0)):
+            return f"dépôt {job.get('deposit')} CR > max_deposit_cr"
+        if float(job.get("reputationPenalty", 0) or 0) > float(jcfg.get("max_rep_penalty", 100)):
+            return "pénalité de réputation trop forte"
+        server = self.job_server(job)
+        if server and server in jcfg.get("skip_servers", []):
+            return "serveur exclu"
+        if problem := self.server_problem(job):
+            return problem
+        if self.job_access(job) == "acquisition" and not jcfg.get("allow_hack", True):
+            return "il faut pirater le serveur (allow_hack = false)"
+        return None
+
+    def server_problem(self, job: dict) -> str | None:
+        """Serveur du job en maintenance d'après la carte (on ne signe pas, on ne commence pas)."""
+        server = self.job_server(job)
+        srv = self.events.server(server) if server else None
+        if srv and srv.get("isInMaintenance"):
+            return f"{server} en maintenance jusqu'à {local_time(srv.get('maintenanceEndsAt'))}"
+        return None
+
+    @staticmethod
+    def job_access(job: dict) -> str | None:
+        """Condition d'accès du job (guide) : « grant » = accès donné tant que le job est actif,
+        « acquisition » = il faut avoir piraté le serveur. Lecture tolérante des conditions."""
+        blob = json.dumps(job.get("conditions") or {}, default=str).lower()
+        if "acquisition" in blob or "acquire" in blob:
+            return "acquisition"
+        if "grant" in blob:
+            return "grant"
+        return None
+
+    def perform_job(self, job: dict) -> None:
+        jtype = job.get("jobType")
+        details = self.job_details(job)
+        self.log.info("Exécution du job %s (%s) : %s", job["name"], jtype, json.dumps(details, default=str)[:300])
+        if jtype == "DecryptFile":
+            self.do_decrypt_job(details)
+        elif jtype in {"DownloadLog", "DeleteLog"}:
+            self.do_sai_list_job(job, details, tab="tab_logs", room_action="get.logs", list_key="logs",
+                                 delete=(jtype == "DeleteLog"))
+        elif jtype in {"DownloadFile", "DeleteFile"}:
+            self.do_sai_list_job(job, details, tab="tab_files", room_action="get.files", list_key="files",
+                                 delete=(jtype == "DeleteFile"))
+        elif jtype in {"DeleteIps", "AddIps"}:
+            self.do_transit_job(job, details, add=(jtype == "AddIps"))
+        else:
+            raise StepFailed(f"type de job non géré : {jtype}")
+
+    # ----- Loadout / préréglages ------------------------------------------------
+    def apply_preset(self, name: str) -> None:
+        if not name:
+            return
+        if self._current_preset == name:
+            return
+        if not self.allowed(f"appliquer le préréglage Loadout « {name} »"):
+            return
+        self.dock("loadout")
+        header = self.page.locator(comp("LoadoutHeader"))
+        header.wait_for(timeout=15000)
+        power = self.page.locator('[data-sentry-element="LoadoutHeaderPowerButtonStyled"]')
+
+        def powered() -> bool:
+            return self.page.evaluate("() => localStorage.getItem('loadout-powered')") == "true"
+
+        if powered():
+            power.click()
+            self.pause(1200)
+        self.button(self.page, "presets").click()
+        modal = self.page.locator(cname("PresetsModal"))
+        modal.wait_for(timeout=8000)
+        rows = modal.locator(comp("PresetRow"))
+        row = None
+        for i in range(rows.count()):
+            if rows.nth(i).inner_text().split("\n")[0].strip() == name:
+                row = rows.nth(i)
+        if row is None:
+            raise StepFailed(f"préréglage « {name} » introuvable")
+        mark = self.events.mark()
+        apply_btn = self.button(row, "apply")
+        if apply_btn.count():                    # sinon il est déjà ACTIF
+            apply_btn.click()
+            self.wait_event("loadout", "apply.preset", mark, timeout=15)
+        # Fermer avec la croix (le 1er bouton de la fenêtre est « Enregistrer la configuration »)
+        self.page.locator('[data-sentry-element="LoadoutModalCloseButtonStyled"]').first.click()
+        self.pause(400)
+        if not powered():
+            power.click()
+            self.pause(1500)
+        self.button(self.page, "back").click()
+        self.pause(1200)
+        self._current_preset = name
+        self.log.info("Préréglage « %s » actif", name)
+
+    def restore_preset(self) -> None:
+        name = self.cfg["jobs"].get("restore_preset")
+        if name and self._current_preset not in (None, name):
+            self.apply_preset(name)
+
+    # ----- Déchiffrement (ICE WALL Break) ------------------------------------
+    def do_decrypt_job(self, details: dict) -> None:
+        files = details.get("files") or []
+        if not files:
+            raise StepFailed("job de déchiffrement sans fichier")
+        target = files[0]
+        ext = (target.get("name", "").rsplit(".", 1)[-1] or "").lower()
+        presets = self.cfg["jobs"].get("decrypt_presets", {})
+        self.apply_preset(presets.get(ext, presets.get("default", "decrypt")))
+
+        self.close_all_windows()
+        self.page.locator(comp("DesktopShortcutComponent")).filter(has_text=rx(r"^\s*Downloads\s*$")).dblclick()
+        folder = self.window(comp("FolderApplication"))
+        folder.wait_for(timeout=10000)
+        icon = folder.locator(f'{comp("FolderShortcut")}[data-app-id="{target["id"]}"]')
+        if not icon.count():
+            icon = folder.locator(comp("FolderShortcut")).filter(has_text=target.get("name", "")[:12])
+        icon.first.dblclick()
+        analysis = self.window(comp("FileAnalysisProtocolApplication"))
+        analysis.wait_for(timeout=10000)
+        decrypt = self.button(analysis, "decrypt")
+        try:
+            decrypt.wait_for(timeout=8000)
+        except PWTimeout:
+            if self.dry_run:
+                self.log.info("[SIMULATION] pas de bouton Déchiffrer (le préréglage n'a pas été appliqué)")
+                return
+            raise StepFailed("pas de bouton Déchiffrer : programme de déchiffrement absent ou trop faible")
+        if not self.allowed(f"lancer le déchiffrement de {target.get('name')}"):
+            return
+        mark = self.events.mark()
+        decrypt.click()
+        ev = self.wait_event("minigames", "start.minigame", mark, timeout=15)
+        info = ev.data or {}
+        if not info.get("url") and info.get("lockExpiresAt"):
+            raise StepFailed(f"mini-jeu verrouillé jusqu'à {info['lockExpiresAt']} (échec précédent)")
+        self.solve_ice_wall()
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            lock = self.events.find(mark, "minigames", "start.minigame",
+                                    pred=lambda e: bool((e.data or {}).get("lockExpiresAt")))
+            if lock:
+                raise StepFailed(f"ICE WALL perdu, mini-jeu verrouillé jusqu'à {lock[-1].data['lockExpiresAt']}")
+            updated = self.events.find(mark, "desktop", "update.file",
+                                       pred=lambda e: ((e.data or {}).get("file") or {}).get("id") == target["id"])
+            if updated or self.events.find(mark, "market", "job.can-complete"):
+                self.log.info("Fichier %s déchiffré", target.get("name"))
+                break
+            self.pause(500)
+        else:
+            raise StepFailed("pas de confirmation du déchiffrement")
+        self.close_all_windows()
+
+    def solve_ice_wall(self, timeout_s: float = 150) -> None:
+        win = self.window(comp("IceWallBreakApplication"))
+        win.wait_for(timeout=20000)
+        tried: set[tuple[int, ...]] = set()
+        deadline = time.time() + timeout_s
+        last_done = -1
+        memory: dict[int, str] = {}
+        round_key = None
+        while time.time() < deadline:
+            self.check_session()
+            state = self.page.evaluate(ICE_WALL_JS)
+            if state is None:
+                return                                   # fenêtre fermée : fin du mini-jeu
+            if state.get("limit"):
+                raise StepFailed("ICE WALL : limite quotidienne de parties atteinte")
+            done, total = state.get("done"), state.get("total")
+            if done is not None and done != last_done:
+                self.log.info("ICE WALL : %s/%s", done, total)
+                last_done = done
+            if total and done is not None and done >= total:
+                self.pause(1500)
+                return
+            targets = [Glyph(t["sig"], t["x"], t["y"], t["flip"]) for t in state["targets"]]
+            key = (done, tuple(t.sig for t in targets))
+            if key != round_key:                         # nouvelle manche : nouveau mur
+                round_key, memory, tried = key, {}, set()
+            for c in state["cells"]:
+                if c.get("npath", 3) > 2:
+                    memory[c["index"]] = c["sig"]
+            cells = [Cell(memory.get(c["index"], c["sig"]), c["x"], c["y"], c["flip"], index=c["index"],
+                          cx=c["cx"], cy=c["cy"], hidden=c["index"] not in memory) for c in state["cells"]]
+            if not targets:
+                self.pause(300)
+                continue
+            group, why = solve_ice_wall_partial(targets, cells)
+            key = tuple(sorted(c.index for c in group)) if group else None
+            if group is None or key in tried:
+                self.pause(250)                          # pas encore assez de glyphes visibles
+                continue
+            tried.add(key)
+            cell = group[ice_anchor_index(targets)]
+            # UN seul clic : le jeu pose tout le motif à partir de la cellule ancre.
+            # Un mauvais placement coûte 20 s ; un échec verrouille le mini-jeu 20 min.
+            self.log.info("ICE WALL : motif trouvé (%s, %d/%d cases visibles), clic sur l'ancre %d",
+                          why, sum(not c.hidden for c in cells), len(cells), cell.index)
+            self.page.mouse.move(cell.cx, cell.cy)
+            self.pause(150)
+            self.page.mouse.click(cell.cx, cell.cy)
+            self.pause(1400)                             # réponse du serveur (match / pénalité)
+        self.snapshot("ice_wall_timeout")
+        raise StepFailed("ICE WALL non résolu dans le temps imparti")
+
+    # ----- Jobs serveur (SAI) : connexion, accès par tâche, piratage ------------
+    def open_sai(self, server: str) -> Locator:
+        """Ouvre le Terminal SAI d'un serveur.
+        1) accès « par tâche » (condition Grant du job) s'il est proposé ;
+        2) sinon outil de piratage du loadout : le jeu réutilise l'accès déjà piraté, ou repirate
+           (après une maintenance, l'accès piraté est perdu) : direct si l'outil est bien plus
+           puissant que la défense, sinon mini-jeu ICE WALL. Le « force hack » payant : jamais."""
+        self.close_window(SAI_APP)
+        self.close_window(SAI_LOGIN)
+        self.close_window(comp("MarketSite"))       # il cacherait la carte ; complete_job le rouvre
+        self._market_name = None
+        win = self.open_login(server)
+        if win.locator(SAI_APP).count():
+            return self.window(SAI_APP)
+        if win.locator(cname("SaiAccessItem")).count():
+            return self.login_with_access(server, win)
+        return self.login_with_tool(server, win)
+
+    def open_login(self, server: str) -> Locator:
+        """« Connexion » dans le panneau du serveur -> fenêtre SaiLogin (ou directement le terminal)."""
+        nm = self.ensure_reachable(server)
+        mark = self.events.mark()
+        btn = self.page.locator('[data-onboarding-300-id="ServerInfoPanelLoginButton"]')
+        if not btn.count():
+            btn = self.button(nm, "login")
+        self.safe_click(btn.first)
+        win = self.page.locator(WINDOW).filter(has=self.page.locator(f"{SAI_LOGIN}, {SAI_APP}")).last
+        win.wait_for(timeout=15000)
+        try:
+            self.wait_event("sai", "get.login.status", mark, timeout=8)
+        except StepFailed:
+            self.log.debug("SAI %s : pas d'état de connexion reçu", server)
+        return win
+
+    def login_with_access(self, server: str, win: Locator) -> Locator:
+        mark = self.events.mark()
+        self.safe_click(win.locator(cname("SaiAccessItem")).first)
+        ev = self.wait_event("sai", "login.with-access", mark, timeout=15)
+        if not (ev.data or {}).get("success"):
+            raise StepFailed(f"connexion SAI refusée sur {server} : {ev.data}")
+        app = self.window(SAI_APP)
+        app.wait_for(timeout=15000)
+        return app
+
+    def hack_preset_for(self, type_name: str | None) -> str | None:
+        """Préréglage Loadout à mettre avant un piratage, selon serverTypeName (config hack_presets)."""
+        presets = self.cfg["jobs"].get("hack_presets") or {}
+        if type_name:
+            if type_name in presets:
+                return presets[type_name]
+            low = type_name.lower()
+            for key, value in presets.items():
+                if key != "default" and key.lower() in low:
+                    return value
+        return presets.get("default")
+
+    def login_with_tool(self, server: str, win: Locator) -> Locator:
+        if not self.cfg["jobs"].get("allow_hack", True):
+            raise StepFailed(f"{server} : aucun accès par tâche, il faut pirater (allow_hack = false)")
+        srv = self.events.server(server) or {}
+        preset = self.hack_preset_for(srv.get("serverTypeName"))
+        if preset and preset != self._current_preset and not self.dry_run:
+            self.log.info("%s (%s) : préréglage de piratage « %s »", server, srv.get("serverTypeName"), preset)
+            self.close_window(SAI_LOGIN)
+            self.apply_preset(preset)
+            win = self.open_login(server)
+            if win.locator(SAI_APP).count():
+                return self.window(SAI_APP)
+            if win.locator(cname("SaiAccessItem")).count():
+                return self.login_with_access(server, win)
+        for attempt in (1, 2):
+            outcome = self.click_hack_tool(server, win)
+            if outcome == "simulation":
+                raise Simulated(f"connexion à {server} par l'outil de piratage non lancée (simulation)")
+            if outcome == "logged":
+                return self.window(SAI_APP)
+            # piratage réussi : le jeu propose alors l'accès, ou le réutilise au prochain clic sur l'outil
+            self.pause(1000)
+            if self.window(SAI_APP).count():
+                return self.window(SAI_APP)
+            self.close_window(SAI_LOGIN)
+            win = self.open_login(server)
+            if win.locator(SAI_APP).count():
+                return self.window(SAI_APP)
+            if win.locator(cname("SaiAccessItem")).count():
+                return self.login_with_access(server, win)
+        raise StepFailed(f"{server} : piratage terminé mais connexion impossible")
+
+    def click_hack_tool(self, server: str, win: Locator) -> str:
+        """Clique l'outil le plus puissant. Renvoie « logged » (accès réutilisé, terminal ouvert),
+        « hacked » (nouvel accès obtenu) ou « simulation »."""
+        status_ev = self.events.last("sai", "get.login.status")
+        status = (status_ev.data if status_ev and isinstance(status_ev.data, dict) else None) or {}
+        srv = self.events.server(server) or {}
+        defence = status.get("serverDefenceRate", srv.get("serverDefenceRate"))
+        if status.get("isLocked"):
+            raise StepFailed(f"connexion à {server} verrouillée (encore {status.get('lockExpiresIn')})")
+        box = win.locator(comp("SaiHackTools"))
+        if not box.count():
+            if win.locator(comp("SaiNoTools")).count():
+                raise StepFailed(f"{server} : aucun outil de piratage assez puissant (défense {defence}) ; "
+                                 "vérifie hack_presets")
+            raise StepFailed(f"{server} : ni accès par tâche ni outil de piratage")
+        tools = [t for t in status.get("hackTools") or [] if isinstance(t, dict) and t.get("moduleName")]
+        tool = max(tools, key=lambda t: float(t.get("hackPower") or 0)) if tools else None
+        target = box.get_by_text(tool["moduleName"], exact=True).first if tool else None
+        if target is None or not target.count():
+            raise StepFailed(f"{server} : outil de piratage introuvable dans la fenêtre ({tools})")
+        if not self.allowed(f"se connecter à {server} avec {tool['moduleName']} "
+                            f"(puissance {tool.get('hackPower')}, défense {defence})"):
+            return "simulation"
+        mark = self.events.mark()
+        self.safe_click(target)
+        deadline = time.time() + 25
+        while time.time() < deadline:
+            if self.events.find(mark, "sai", "login.with-access",
+                                pred=lambda e: bool((e.data or {}).get("success"))):
+                self.window(SAI_APP).wait_for(timeout=15000)
+                self.log.info("%s : accès piraté encore valable, connexion directe", server)
+                return "logged"
+            started = self.events.find(mark, "sai", "hack.start")
+            if started and isinstance(started[-1].data, dict) and started[-1].data.get("autoHacked"):
+                self.log.info("%s : piraté sans mini-jeu (outil bien plus puissant que la défense)", server)
+                return "hacked"
+            game = self.events.find(mark, "minigames", "start.minigame")
+            if game:
+                info = game[-1].data or {}
+                if not info.get("url") and info.get("lockExpiresAt"):
+                    raise StepFailed(f"ICE WALL verrouillé jusqu'à {local_time(info['lockExpiresAt'])} (échec récent)")
+                self.log.info("%s : piratage par ICE WALL (défense %s)", server, defence)
+                self.solve_ice_wall()
+                self.wait_hack_finished(server, mark)
+                return "hacked"
+            self.pause(200)
+        self.snapshot("piratage_sans_reponse")
+        raise StepFailed(f"{server} : le piratage n'a pas démarré")
+
+    def wait_hack_finished(self, server: str, mark: int, timeout: float = 20) -> None:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            fin = self.events.find(mark, "sai", "update",
+                                   pred=lambda e: isinstance(e.data, dict) and e.data.get("reason") == "hack.finished")
+            if fin:
+                if fin[-1].data.get("success") is False:
+                    raise StepFailed(f"{server} : piratage échoué")
+                self.log.info("%s : piratage réussi", server)
+                return
+            lock = self.events.find(mark, "minigames", "start.minigame",
+                                    pred=lambda e: bool((e.data or {}).get("lockExpiresAt")))
+            if lock:
+                raise StepFailed(f"ICE WALL perdu : verrouillé jusqu'à {local_time(lock[-1].data['lockExpiresAt'])}")
+            self.pause(300)
+        raise StepFailed(f"{server} : pas de confirmation de fin de piratage")
+
+    def do_sai_list_job(self, job: dict, details: dict, tab: str, room_action: str,
+                        list_key: str, delete: bool) -> None:
+        server = self.job_server(job)
+        if not server:
+            raise StepFailed("job serveur sans serveur")
+        sai = self.open_sai(server)
+        mark = self.events.mark()
+        sai.locator(comp("SaiHeader")).get_by_role("button", name=rx(TXT[tab])).click()
+        ev = self.wait_event("sai", room_action, mark, timeout=15)
+        items = (ev.data or {}).get(list_key) or []
+        index = self._find_target(items, details, list_key)
+        panel = sai.locator(comp("SaiLogs" if list_key == "logs" else "SaiFiles"))
+        icon = "TrashIcon" if delete else "DownloadIcon"
+        buttons = panel.locator("button").filter(has=self.page.locator(comp(icon)))
+        buttons.nth(index).wait_for(timeout=10000)
+        row = buttons.nth(index).locator("xpath=ancestor::div[.//*[@data-sentry-component='TrashIcon']][1]")
+        label = items[index].get("message") or items[index].get("name") or ""
+        if label and label[:25] not in row.inner_text():
+            raise StepFailed(f"la ligne {index} ne correspond pas à « {label} » : rien n'est fait")
+        verb = "supprimer" if delete else "télécharger"
+        if not self.allowed(f"{verb} « {label} » sur {server}"):
+            return
+        mark = self.events.mark()
+        buttons.nth(index).click()
+        if delete:      # une fenêtre de confirmation s'ouvre (non vérifié en direct)
+            modal = self.page.locator(cname("SaiDeleteModal"))
+            modal.wait_for(timeout=8000)
+            modal.locator(cname("SaiDeleteButtons")).get_by_role("button").last.click()
+        self._expect_can_complete(mark)
+        self.close_window(comp("ServerAdministrationInterfaceApplication"))
+
+    def _expect_can_complete(self, mark: int, timeout: float = 15) -> None:
+        """Le serveur pousse market:job.can-complete si la fenêtre du Market est ouverte ;
+        sinon complete_job revérifie canComplete dans la liste des jobs."""
+        if not self.window(comp("MarketSite")).count():
+            self.pause(1500)
+            return
+        try:
+            self.wait_event("market", "job.can-complete", mark, timeout=timeout,
+                            pred=lambda e: (e.data or {}).get("canComplete") is True)
+        except StepFailed:
+            self.log.info("Pas de notification « can-complete » : vérification dans la liste des jobs")
+
+    @staticmethod
+    def _find_target(items: list[dict], details: dict, list_key: str) -> int:
+        """Index de la cible dans la liste du serveur. Les doublons de noms sont
+        départagés par le numéro de séquence fourni par le job, sinon par source == 'job'."""
+        seqs = details.get("logSeqs") or details.get("fileSeqs") or []
+        ids = details.get("fileIds") or details.get("logIds") or []
+        names = details.get("logNames") or details.get("fileNames") or details.get("names") or []
+        for i, it in enumerate(items):
+            if seqs and it.get("seq") in seqs:
+                return i
+            if ids and it.get("id") in ids:
+                return i
+        candidates = [i for i, it in enumerate(items)
+                      if (it.get("message") or it.get("name")) in names] if names else []
+        if len(candidates) > 1:
+            candidates = [i for i in candidates if items[i].get("source") == "job"] or candidates
+        if len(candidates) == 1:
+            return candidates[0]
+        raise StepFailed(f"cible introuvable ou ambiguë dans {list_key} : {details}")
+
+    def do_transit_job(self, job: dict, details: dict, add: bool) -> None:
+        # Écran non testé en direct (le job IP Injection en cours n'était pas à moi) :
+        # désactivé par défaut (allow_ip_add / allow_deletions dans config.toml).
+        server = self.job_server(job)
+        ips = details.get("ips") or []
+        if not server or not ips:
+            raise StepFailed(f"job transit incomplet : {details}")
+        sai = self.open_sai(server)
+        mark = self.events.mark()
+        sai.locator(comp("SaiHeader")).get_by_role("button", name=rx(TXT["tab_transit"])).click()
+        self.wait_event("sai", "get.transit", mark, timeout=15)
+        for ip in ips:
+            if add:
+                if not self.allowed(f"ajouter l'IP {ip} sur {server}"):
+                    continue
+                sai.locator(comp("SaiAddButton")).first.click()
+                modal = self.page.locator(cname("SaiAddIpModal"))
+                modal.wait_for(timeout=8000)
+                modal.locator(cname("SaiAddIpModalIpInput")).fill(ip)
+                modal.locator(cname("SaiAddIpModalSaveButton")).click()
+            else:
+                row = sai.get_by_text(ip, exact=True).locator(
+                    "xpath=ancestor::div[.//*[@data-sentry-component='TrashIcon']][1]")
+                if not row.count():
+                    raise StepFailed(f"IP {ip} absente de la liste de transit")
+                if not self.allowed(f"supprimer l'IP {ip} sur {server}"):
+                    continue
+                row.locator("button").filter(has=self.page.locator(comp("TrashIcon"))).click()
+                modal = self.page.locator(cname("SaiDeleteModal"))
+                modal.wait_for(timeout=8000)
+                modal.locator(cname("SaiDeleteButtons")).get_by_role("button").last.click()
+            self.pause(1200)
+        self._expect_can_complete(mark)
+        self.close_window(comp("ServerAdministrationInterfaceApplication"))
+
+    # =========================================================================
+    # 3. Mercenaires
+    # =========================================================================
+    @staticmethod
+    def _missions(data: Any) -> list[dict]:
+        return [m for m in (data if isinstance(data, list) else [data] if data else []) if isinstance(m, dict)]
+
+    def active_expeditions(self) -> list[dict]:
+        self.close_window(comp("ExpeditionsApplication"))
+        mark = self.events.mark()
+        self.dock("expeditions")
+        self.window(comp("ExpeditionsApplication")).wait_for(timeout=15000)
+        ev = self.wait_event("expeditions", "get.active", mark, timeout=15)
+        return self._missions(ev.data)
+
+    def run_mercs(self) -> str:
+        mcfg = self.cfg["mercenaries"]
+        self.ensure_connected()
+        self.close_all_windows()
+        notes = []
+        try:
+            active = self.active_expeditions()
+            # Engager (dépense de CR) : seulement au passage complet, jamais en mode --auto horaire.
+            if not active and mcfg.get("hire", False) and not self.auto_mode:
+                try:
+                    notes.append(self.hire_mercenary())
+                finally:
+                    self.restore_endpoint()
+                active = self.active_expeditions()
+            if active:
+                notes.append(self.watch_expeditions(float(mcfg.get("watch_minutes", 40))))
+        finally:
+            if self.state is not None:
+                ev = self.events.last("expeditions", "get.active")
+                missions = self._missions(ev.data) if ev else []
+                self.state.set_expedition(any(m.get("status") in ACTIVE_EXPEDITION for m in missions))
+        return "; ".join(n for n in notes if n) or "aucune expédition en cours"
+
+    def hire_mercenary(self) -> str:
+        mcfg = self.cfg["mercenaries"]
+        market = self.open_market(mcfg.get("hire_market") or HOME_SERVER)
+        mark = self.events.mark()
+        self.market_tab(market, "hire_tab")
+        ev = self.wait_event("expeditions", "get.mercenaries", mark, timeout=15)
+        mercs = [m for m in (ev.data or {}).get("mercenaries", []) if m.get("status") == "AVAILABLE"]
+        prefs = mcfg.get("preferred", [])
+        mercs.sort(key=lambda m: prefs.index(m["callsign"]) if m.get("callsign") in prefs else len(prefs))
+        if prefs and mcfg.get("only_preferred", False):
+            mercs = [m for m in mercs if m.get("callsign") in prefs]
+        if not mercs:
+            return "aucun mercenaire disponible"
+        merc = mercs[0]
+        card = market.locator(comp("MercenaryCard")).filter(has_text=merc["callsign"]).first
+        more = card.locator(cname("MercenaryCardCollapsedReadMore"))
+        if more.count() and re.search(TXT["read_more"], more.first.inner_text(), re.I):
+            more.first.click()
+            self.pause(400)
+        mark = self.events.mark()
+        card.locator(comp("Button")).filter(has_text=rx(TXT["hire_tab"])).first.click()
+        panel = self.page.locator(cname("HireSideoutPanel"))
+        panel.wait_for(timeout=10000)
+        for idx, wanted in ((0, mcfg.get("location")), (1, mcfg.get("goal"))):
+            if wanted:
+                panel.locator(cname("CustomSelectTrigger")).nth(idx).click()
+                self.page.get_by_text(wanted, exact=True).last.click()
+                self.pause(600)
+        quote_ev = self.wait_event("expeditions", "configure", mark, timeout=15)
+        quote = self.events.last("expeditions", "configure").data or quote_ev.data or {}
+        total = int(quote.get("totalCost") or 0)
+        death = float((quote.get("outcomeChances") or {}).get("deathChance") or 0)
+        risk = quote.get("riskLevel")
+        balance = self.balance()
+        self.log.info("Devis %s : %s CR (acompte %s), risque %s, mort %s %%, durée %s min",
+                      merc["callsign"], total, quote.get("prepaymentAmount"), risk, death,
+                      round((quote.get("duration") or 0) / 60000))
+        problems = []
+        if total > int(mcfg.get("max_spend_cr", 0)):
+            problems.append(f"coût {total} CR > max_spend_cr")
+        if death > float(mcfg.get("max_death_chance", 0)):
+            problems.append(f"risque de mort {death} %")
+        if balance is not None and balance - total < int(mcfg.get("keep_min_balance", 0)):
+            problems.append(f"solde {balance} CR insuffisant")
+        if problems:
+            panel.locator(cname("SideoutHeaderCloseButton")).click()
+            return f"{merc['callsign']} non engagé : " + ", ".join(problems)
+        if not self.allowed(f"engager {merc['callsign']} pour {total} CR (acompte {quote.get('prepaymentAmount')})"):
+            panel.locator(cname("SideoutHeaderCloseButton")).click()
+            return f"simulation : {merc['callsign']} pour {total} CR"
+        panel.locator(cname("HireSideoutDisclaimerCheckbox")).click()
+        mark = self.events.mark()
+        panel.get_by_role("button", name=rx(TXT["hire_pay"])).click()
+        ev = self.wait_event("expeditions", "launch", mark, timeout=20)
+        self.log.info("Expédition lancée : %s (%s)", merc["callsign"], (ev.data or {}).get("status"))
+        self.close_all_windows()
+        return f"{merc['callsign']} engagé ({total} CR)"
+
+    def choose_option(self, message: dict) -> dict | None:
+        options = message.get("decisionOptions") or []
+        if not options:
+            return None
+        policy = self.cfg["mercenaries"].get("event_policy", "prudent")
+        if policy == "auto":            # on laisse le jeu choisir l'option par défaut à l'échéance
+            return None
+        max_risk = float(self.cfg["mercenaries"].get("max_risk_modifier", 10))
+
+        def risk(o): return float(o.get("riskModifier") or 0)
+
+        def loot(o): return float(o.get("lootModifier") or 0)
+        if policy == "gourmand":
+            pool = [o for o in options if risk(o) <= max_risk] or options
+            return max(pool, key=lambda o: (loot(o), -risk(o)))
+        return min(options, key=lambda o: (risk(o), -loot(o)))       # prudent
+
+    def watch_expeditions(self, max_minutes: float) -> str:
+        deadline = time.time() + max_minutes * 60
+        answered: set[str] = set()
+        win = self.window(comp("ExpeditionsApplication"))
+        last_status = None
+        while time.time() < deadline:
+            self.check_session()
+            if not win.count():
+                self.dock("expeditions")
+                win.wait_for(timeout=15000)
+            active_ev = self.events.last("expeditions", "get.active")
+            ev = active_ev or self.events.last("expeditions", "respond.event")
+            missions = self._missions(ev.data) if active_ev else (ev.data if ev and isinstance(ev.data, list) else [])
+            if not missions:
+                return "expéditions terminées"
+            for mission in missions:
+                status = mission.get("status")
+                if status != last_status:
+                    self.log.info("Expédition %s : %s %s", (mission.get("mercenary") or {}).get("callsign"),
+                                  status, mission.get("outcome") or "")
+                    last_status = status
+                for msg in mission.get("messages") or []:
+                    if msg.get("messageType") != "DECISION" or msg.get("isResolved") or msg.get("id") in answered:
+                        continue
+                    answered.add(msg["id"])
+                    option = self.choose_option(msg)
+                    self.log.info("Événement : %s | options : %s | choix : %s", msg.get("content"),
+                                  [(o.get("label"), o.get("riskModifier"), o.get("lootModifier"))
+                                   for o in msg.get("decisionOptions") or []],
+                                  option.get("label") if option else "défaut du jeu")
+                    if option and self.allowed(f"répondre « {option['label']} »"):
+                        card = win.locator(comp("ExpeditionsEventCard")).filter(
+                            has_text=(msg.get("content") or "")[:40]).first
+                        mark = self.events.mark()
+                        card.locator(comp("ChamferedButton")).filter(has_text=option["label"]).first.click()
+                        self.wait_event("expeditions", "respond.event", mark, timeout=15)
+                if status == "COMPLETED":
+                    return self.collect_expedition(win, mission)
+            self.pause(2000)
+        return "surveillance terminée (durée max atteinte)"
+
+    def collect_expedition(self, win: Locator, mission: dict) -> str:
+        mcfg = self.cfg["mercenaries"]
+        remaining = int(mission.get("remainingAmount") or 0)
+        name = (mission.get("mercenary") or {}).get("callsign")
+        outcome = mission.get("outcome")
+        if remaining and not mcfg.get("pay_on_return", False):
+            return f"{name} : {outcome}, solde de {remaining} CR à payer à la main (pay_on_return = false)"
+        if remaining > int(mcfg.get("max_spend_cr", 0)):
+            return f"{name} : solde {remaining} CR > max_spend_cr, à payer à la main"
+        container = win.locator(cname("ExpeditionsEventContainerButton"))
+        if container.count() and container.first.is_enabled():
+            if not self.allowed(f"ouvrir le conteneur de {name}"):
+                return "simulation : conteneur non ouvert"
+            mark = self.events.mark()
+            container.first.click()
+            self.wait_event("expeditions", "open.container", mark, timeout=15)
+        collect = win.locator(comp("ExpeditionsClaimFooter")).get_by_role("button", name=rx(r"Tout récupérer|Collect all"))
+        try:
+            collect.first.wait_for(timeout=10000)
+        except PWTimeout:
+            return f"{name} : {outcome}, rien à récupérer (ou écran inattendu, voir logs/debug)"
+        # Constaté le 21/10/2026 : « Payer et ouvrir » ouvre le conteneur, le solde est débité
+        # au moment de « Tout récupérer » (collect.all).
+        if not self.allowed(f"récupérer le butin de {name} et payer le solde ({remaining} CR)"):
+            return "simulation : butin non récupéré"
+        mark = self.events.mark()
+        collect.first.click()
+        self.wait_event("expeditions", "collect.all", mark, timeout=15)
+        return f"{name} : {outcome}, butin récupéré, solde payé {remaining} CR"
+
+
+# ---------------------------------------------------------------------------
+# Programme principal
+# ---------------------------------------------------------------------------
+SECTION = {"daily": "daily", "jobs": "jobs", "markets": "markets", "mercs": "mercenaries"}
+DEFAULT_ON = {"daily", "markets"}
+
+
+def in_hours(hours: Any, now_local: dt.datetime) -> bool:
+    """Heures autorisées [début, fin[ en heure locale ; [22, 6] passe minuit."""
+    try:
+        start, end = int(hours[0]), int(hours[1])
+    except (TypeError, ValueError, IndexError):
+        return True
+    if start == end or (start <= 0 and end >= 24):
+        return True
+    if start < end:
+        return start <= now_local.hour < end
+    return now_local.hour >= start or now_local.hour < end
+
+
+def auto_decision(cfg: dict, state: State, now: dt.datetime, idle_s: float | None,
+                  only: list[str] | None = None) -> tuple[list[str], str]:
+    """Mode --auto : parties à lancer maintenant (liste vide = ne rien lancer) et pourquoi."""
+    acfg = cfg.get("auto", {})
+    due = state.due(cfg, now)
+    if only:
+        due = {k: v for k, v in due.items() if k in only}
+    if not due:
+        return [], "rien à faire"
+    reasons = " ; ".join(f"{k} : {v}" for k, v in due.items())
+    if not in_hours(acfg.get("hours", [0, 24]), now.astimezone()):
+        return [], f"hors des heures autorisées [auto] hours ({reasons})"
+    min_idle = float(acfg.get("skip_if_user_active_min", 10)) * 60
+    if idle_s is not None and min_idle > 0 and idle_s < min_idle:
+        return [], f"PC utilisé il y a {int(idle_s)} s, je ne prends pas ta session ({reasons})"
+    return [p for p in SECTION if p in due], reasons
+
+
+def warn_daily_if_late(cfg: dict, state: State, notifier: Notifier, why: str, now: dt.datetime) -> None:
+    """Daily pas faite et reset proche (00:00 UTC) : une alerte par jour au lieu de forcer."""
+    if not cfg["daily"].get("enabled", True) or state.daily_done_today(now):
+        return
+    reset = now.replace(hour=0, minute=0, second=0, microsecond=0) + dt.timedelta(days=1)
+    left_h = (reset - now).total_seconds() / 3600
+    if left_h > float(cfg["auto"].get("warn_daily_hours", 3)) or state.data.get("daily_warned") == now.date().isoformat():
+        return
+    state.data["daily_warned"] = now.date().isoformat()
+    notifier.send("cor3 : daily pas encore faite",
+                  f"Reset dans {left_h:.1f} h ({local_time(reset)}). Le bot ne l'a pas lancée : {why}.", failure=True)
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description="Automatisation quotidienne de cor3.gg")
+    ap.add_argument("--config", default=str(ROOT / "config.toml"))
+    ap.add_argument("--login", action="store_true", help="ouvrir le profil dédié pour se connecter")
+    ap.add_argument("--dry-run", action="store_true", help="simulation : aucune validation")
+    ap.add_argument("--only", action="append", choices=list(SECTION), help="limiter à une partie")
+    ap.add_argument("--auto", action="store_true",
+                    help="passage horaire : ne lance le navigateur que si quelque chose est dû")
+    ap.add_argument("--headless", action="store_true", help="navigateur invisible")
+    ap.add_argument("--test-notify", action="store_true", help="tester les alertes")
+    ap.add_argument("--url", default=None, help=argparse.SUPPRESS)      # maquette de test
+    args = ap.parse_args(argv)
+    if args.url:
+        global GAME_URL
+        GAME_URL = args.url
+
+    cfg = load_config(Path(args.config))
+    gen = cfg["general"]
+    log_dir = Path(gen.get("log_dir") or ROOT / "logs")
+    if not log_dir.is_absolute():
+        log_dir = ROOT / log_dir
+    gen["log_dir"] = str(log_dir)
+    log = setup_logging(log_dir)
+    notifier = Notifier(cfg["notify"], log)
+    if args.test_notify:
+        notifier.send("cor3_bot : test", "Si tu lis ceci, les alertes fonctionnent.", failure=True)
+        return 0
+
+    state_path = Path(gen.get("state_file") or "state.json")
+    state = State(state_path if state_path.is_absolute() else ROOT / state_path)
+    dry_run = args.dry_run or bool(gen.get("dry_run", False))
+    lock = ROOT / "cor3_bot.lock"
+    busy = lock_busy(lock)
+    if args.auto and not args.login:
+        parts, why = auto_decision(cfg, state, utc_now(), user_idle_seconds(), args.only)
+        if not parts:
+            (log.debug if why == "rien à faire" else log.info)("Mode auto : %s", why)
+            warn_daily_if_late(cfg, state, notifier, why, utc_now())
+            state.save()
+            return 0
+        if busy:
+            log.info("Mode auto : une exécution est déjà en cours, je passe mon tour (%s)", why)
+            return 0
+        log.info("Mode auto : %s", why)
+    else:
+        parts = args.only or [p for p in SECTION if cfg[SECTION[p]].get("enabled", p in DEFAULT_ON)]
+        if busy and not args.login:            # ex. passage horaire qui surveille une expédition
+            log.info("Une autre exécution est en cours : j'attends qu'elle finisse (50 min max).")
+            deadline = time.time() + 50 * 60
+            while busy and time.time() < deadline:
+                time.sleep(30)
+                busy = lock_busy(lock)
+            if busy:
+                log.error("Une autre exécution est toujours en cours (%s). Supprime ce fichier si ce n'est pas le cas.", lock)
+                notifier.send("cor3 : passage annulé", "Une autre exécution du bot ne s'est pas terminée.", failure=True)
+                return 2
+    if not args.login:
+        lock.write_text(json.dumps({"pid": os.getpid(), "started": dt.datetime.now().isoformat(timespec="seconds"),
+                                    "auto": args.auto}), encoding="utf-8")
+
+    started = time.time()
+    results: dict[str, tuple[str, str]] = {}
+    exit_code = 0
+    if not args.login:
+        log.info("=== cor3_bot démarre (%s%s%s) ===", ", ".join(parts),
+                 ", SIMULATION" if dry_run else "", ", auto" if args.auto else "")
+    try:
+        with sync_playwright() as pw:
+            profile = Path(gen.get("profile_dir") or ROOT / "chrome-profile").expanduser()
+            ctx = pw.chromium.launch_persistent_context(
+                user_data_dir=str(profile),
+                channel=gen.get("channel", "chrome") or None,
+                headless=args.headless or bool(gen.get("headless", False)),
+                viewport={"width": 1600, "height": 900},
+                args=["--mute-audio"],
+            )
+            ctx.set_default_timeout(20000)
+            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+            if args.login:
+                page.goto(GAME_URL)
+                log.info("Connecte-toi à cor3.gg dans cette fenêtre, puis ferme-la.")
+                page.wait_for_event("close", timeout=0)
+                try:
+                    ctx.close()
+                except PWError:
+                    pass
+                return 0
+            events = GameEvents(log)
+            events.attach(page)
+            bot = Bot(page, cfg, log, events, dry_run, state)
+            bot.auto_mode = args.auto
+            try:
+                bot.open_game()
+                for part in parts:
+                    try:
+                        results[part] = ("OK", getattr(bot, f"run_{part}")())
+                        log.info("[%s] OK : %s", part, results[part][1])
+                    except (SessionLost, LoginRequired):
+                        raise
+                    except Exception as exc:
+                        exit_code = 1
+                        results[part] = ("ÉCHEC", f"{type(exc).__name__}: {exc}")
+                        log.error("[%s] ÉCHEC : %s\n%s", part, exc, traceback.format_exc())
+                        bot.snapshot(f"echec_{part}")
+                        try:
+                            bot.close_all_windows()
+                        except Exception:
+                            pass
+            except (SessionLost, LoginRequired) as exc:
+                exit_code = 2
+                results["session"] = ("ÉCHEC", str(exc))
+                log.error("Arrêt : %s", exc)
+            finally:
+                ctx.close()
+    except Exception as exc:
+        exit_code = 2
+        results["navigateur"] = ("ÉCHEC", str(exc))
+        log.error("Erreur fatale : %s\n%s", exc, traceback.format_exc())
+    finally:
+        if not args.login:
+            lock.unlink(missing_ok=True)
+            try:
+                state.data["last_run"] = {"date": dt.datetime.now().isoformat(timespec="seconds"),
+                                          "code": exit_code, "auto": args.auto, "parts": parts}
+                state.save()
+            except Exception as exc:
+                log.warning("state.json non enregistré : %s", exc)
+
+    duration = round(time.time() - started)
+    summary = " | ".join(f"{k}: {s} ({m})" for k, (s, m) in results.items())
+    log.info("=== Fin en %d s, code %d : %s ===", duration, exit_code, summary)
+    with (log_dir / "history.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"date": dt.datetime.now().isoformat(timespec="seconds"), "code": exit_code,
+                             "dry_run": dry_run, "auto": args.auto, "duration_s": duration,
+                             "results": results}, ensure_ascii=False) + "\n")
+    daily_failed = results.get("daily", ("OK",))[0] != "OK" or "session" in results or "navigateur" in results
+    if daily_failed and "daily" in parts:
+        notifier.send("cor3 : la daily a échoué", summary, failure=True)
+    elif exit_code:
+        notifier.send("cor3 : exécution incomplète", summary, failure=True)
+    else:
+        notifier.send("cor3 : OK", summary, failure=False)
+    return exit_code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

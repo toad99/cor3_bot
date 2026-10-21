@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>CORE GG (maquette de test)</title>
+<style>
+  body { font-family: monospace; background: #111; color: #ddd; margin: 0; }
+  [data-onboarding-300-id] { display: inline-block; padding: 6px 10px; margin: 4px; border: 1px solid #555; cursor: pointer; }
+  [data-sentry-component="AppWindow"] { border: 1px solid #4aa; margin: 8px; padding: 8px; background: #1b2228; }
+  button, .next-button, .submit-button, .encoding-option, .log-entry, .error-type-button { cursor: pointer; }
+  .pulse-timeline { display: flex; gap: 8px; }
+  .pulse-group { display: flex; } .pulse-bar { height: 12px; background: #7cd; margin-right: 1px; }
+  .pulse-bar.short { width: 8px; } .pulse-bar.long { width: 8px; }
+  .log-entry.selected, .error-type-button.selected, .encoding-option.selected { outline: 2px solid #fd4; }
+  svg { background: #0d1418; }
+</style>
+</head>
+<body>
+<div id="top">Terminal local : <span id="term">SB-152 CORP</span></div>
+<div id="dock">
+  <div data-onboarding-300-id="TabBarItem-019a0c41-b17f-7abc-1234-567890abcde2" onclick="openGameCenter()">GAME CENTER</div>
+  <div data-onboarding-300-id="TabBarItem-NETWORK_MAP" onclick="openMap()">MAP</div>
+  <div data-onboarding-300-id="TabBarItem-EXPEDITIONS">EXP</div>
+  <div data-onboarding-300-id="LoadoutTabBarItem">LOADOUT</div>
+</div>
+<div id="windows"></div>
+<script>
+const params = new URLSearchParams(location.search);
+const GAME = params.get('game') || 'signal';
+const DIFF = params.get('difficulty') || 'easy';
+const WS_PORT = params.get('ws');
+const SIGNAL_ID = '019aea65-b0c2-70e9-bbbc-8caed416854c';
+const LOG_ID = '019aaaaa-0000-7000-8000-00000000log1';
+window.__mock = { claims: 0, mismatches: 0, iceDone: 0, logs: [] };
+
+if (WS_PORT) { const ws = new WebSocket(`ws://127.0.0.1:${WS_PORT}/socket.io/?EIO=4&transport=websocket`); ws.binaryType = 'arraybuffer'; window.__ws = ws; }
+
+function el(html) { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstElementChild; }
+function openWindow(appName, title, inner) {
+  const w = el(`<div data-sentry-component="AppWindow"><div data-sentry-component="Application" data-component-name="Application-${appName}">
+     <div data-sentry-component="CloseApp" data-component-name="close-app-btn" onclick="this.closest('[data-sentry-component=AppWindow]').remove()">[x]</div>
+     <div data-component-name="ApplicationTitleText">${title}</div>
+     <div data-sentry-element="ApplicationContentStyled"></div></div></div>`);
+  w.querySelector('[data-sentry-element=ApplicationContentStyled]').append(inner);
+  document.getElementById('windows').append(w);
+  return w;
+}
+function openGameCenter() {
+  openWindow('GAME_CENTER', 'Game Center', el(`<div data-sentry-component="GameCenterApplication">
+    <div><div><div>Tower Defense</div></div><div><div>Open Module</div></div></div>
+    <div><div><div>OPÉRATIONS QUOTIDIENNES</div><div>Daily objective terminal</div></div><div><div onclick="openDaily()">Open Module</div></div></div>
+  </div>`));
+}
+async function openDaily() {
+  const state = await fetch(`/api/user-daily-claim?game=${GAME}&difficulty=${DIFF}`).then(r => r.json());
+  openWindow('DAILY', 'OPÉRATIONS QUOTIDIENNES', el(`<div data-sentry-component="DailyOpsMainScreen">
+     <div>Nouvelle tâche disponible</div>
+     <button data-sentry-component="DailyOpsStartButton" onclick="startTask()">Commencer la tâche</button></div>`));
+  window.__state = state;
+}
+function startTask() { if (GAME === 'signal') openSignal(); else openLogs(); }
+
+// ---------------- Signal Decode ----------------
+const MORSE = {0:'LLLLL',1:'SLLLL',2:'SSLLL',3:'SSSLL',4:'SSSSL',5:'SSSSS',6:'LSSSS',7:'LLSSS',8:'LLLSS',9:'LLLLS'};
+const BIN = Object.fromEntries([...Array(10).keys()].map(d => [d, d.toString(2).padStart(4,'0').replace(/0/g,'S').replace(/1/g,'L')]));
+let sig = null;
+function newSignal() {
+  const len = {easy: 3, medium: 5, hard: 10}[DIFF];
+  const enc = params.get('enc') || (Math.random() < 0.5 ? 'morse' : 'binary');
+  const code = Array.from({length: len}, () => Math.floor(Math.random() * 10)).join('');
+  const table = enc === 'morse' ? MORSE : BIN;
+  sig = {enc, code, pulses: [...code].map(d => table[d]).join('')};
+}
+function openSignal() {
+  const w = openWindow(SIGNAL_ID, 'Décodage du signal', el(`<div data-sentry-component="GameWaitingScreen"><div>Signal Decode</div>
+     <button data-sentry-element="GameWaitingScreenGameActionButtonStyled" onclick="showSignal(this)">Get Signal</button></div>`));
+}
+function showSignal(btn) {
+  newSignal();
+  const content = btn.closest('[data-sentry-element=ApplicationContentStyled]');
+  content.innerHTML = `<div class="game-container"><div class="signal-view-container"><div class="signal-display"><div class="signal-label">Pulse Signal</div>
+    <div class="pulse-timeline">${[...sig.pulses].map(p => p === 'L' ? '<div class="pulse-group"><div class="pulse-bar long  "></div><div class="pulse-bar long  "></div><div class="pulse-bar long  "></div></div>' : '<div class="pulse-group"><div class="pulse-bar short  "></div></div>').join('')}</div>
+    <button class="play-button">Play Signal</button></div></div>
+    <div class="game-footer"><button class="next-button" onclick="showEncoding(this)">Select Encoding</button></div></div>`;
+}
+function showEncoding(btn) {
+  const c = btn.closest('.game-container');
+  c.innerHTML = `<div class="encoding-selection-container"><div class="selection-title">Choose Encoding Type</div><div class="encoding-options">
+     <div class="encoding-option " onclick="pickEnc(this,'morse')"><div class="option-header">Morse Numeric (0-9)</div></div>
+     <div class="encoding-option " onclick="pickEnc(this,'binary')"><div class="option-header">Binary Numeric</div></div></div>
+     <div class="game-footer"><button class="next-button" disabled onclick="showDecode(this)">Decode Signal</button></div></div>`;
+}
+let picked = null;
+function pickEnc(o, e) { picked = e; o.parentElement.querySelectorAll('.encoding-option').forEach(x => x.classList.remove('selected')); o.classList.add('selected'); o.closest('.encoding-selection-container').querySelector('.next-button').disabled = false; }
+function showDecode(btn) {
+  const table = picked === 'morse' ? MORSE : BIN;
+  const c = btn.closest('.game-container');
+  c.innerHTML = `<div class="decoding-container"><div class="signal-display-section"><div class="section-title">Pulse Signal</div>
+     <div class="pulse-timeline">${[...sig.pulses].map(p => `<div class="pulse-group"><div class="pulse-bar ${p === 'L' ? 'long' : 'short'}  "></div></div>`).join('')}</div></div>
+     <div class="encoding-table-section"><div class="encoding-table-full">${Object.entries(table).map(([d, p]) => `<div class="table-row"><span class="digit">${d} :</span><span class="pulses">${p.split('').join(' ')}</span></div>`).join('')}</div></div>
+     <div class="decode-input-section"><input class="code-input" maxlength="${sig.code.length}" type="text" value="" oninput="this.closest('.decode-input-section').querySelector('.submit-button').disabled = !this.value">
+     <div class="input-hint">Code length: ${sig.code.length} digits</div><button class="submit-button" disabled onclick="submitCode(this)">CONFIRM CODE</button></div></div>`;
+}
+async function submitCode(btn) {
+  const v = btn.closest('.decode-input-section').querySelector('.code-input').value;
+  if (v === sig.code) {
+    await fetch('/api/user-daily-claim', {method: 'POST'}); window.__mock.claims++;
+    btn.closest('.game-container').innerHTML = `<div class="result-screen"><div class="result-title success">DECODE STATUS: VERIFIED</div><strong>${v}</strong></div>`;
+  } else {
+    window.__mock.mismatches++;
+    const content = btn.closest('[data-sentry-element=ApplicationContentStyled]');
+    content.innerHTML = '<button data-sentry-element="GameWaitingScreenGameActionButtonStyled" onclick="showSignal(this)">Get Signal</button>';
+  }
+}
+
+// ---------------- System Log Integrity ----------------
+const TYPES = ['AUTH','TEMP-SYNC','SCAN','ROUTE-CHECK','RADIO-TEST','PING','SYNC'];
+const TYPO = {AUTH:'AUHT',SCAN:'SCANN','TEMP-SYNC':'TEMP-SYCN','ROUTE-CHECK':'ROUTE-CHCEK','RADIO-TEST':'RADIO-TETS',PING:'PINGG',SYNC:'SYNCC'};
+const LABELS = {invalid_time:'Time format is incorrect', invalid_event_type:'Event type is incorrect', missing_sector:'Missing /sector parameter', missing_status:'Missing /status parameter', invalid_sector:'/sector parameter is incorrect', invalid_status:'/status parameter is incorrect'};
+const rnd = n => Math.floor(Math.random() * n);
+const pad = n => String(n).padStart(2, '0');
+function genLog(errors) {
+  let t = `${pad(rnd(24))}:${pad(rnd(60))}:${pad(rnd(60))}`, type = TYPES[rnd(7)], sector = String(1 + rnd(256)), status = ['OK','WARN','ERROR'][rnd(3)];
+  if (errors.includes('invalid_time')) t = `${pad(rnd(24))}:${60 + rnd(10)}:${pad(rnd(60))}`;
+  if (errors.includes('invalid_event_type')) type = TYPO[type];
+  if (errors.includes('invalid_sector')) sector = String(257 + rnd(100));
+  if (errors.includes('invalid_status')) status = 'OKAY';
+  let line = `[${t}] ${type}`;
+  if (!errors.includes('missing_sector')) line += ` /sector=${sector.padStart(2, '0')}`;
+  if (!errors.includes('missing_status')) line += ` /status=${status}`;
+  return {line, errors};
+}
+let logs = [], selected = new Set();
+function openLogs() {
+  openWindow(LOG_ID, 'System Log Integrity', el(`<div data-sentry-component="GameWaitingScreen"><div>Press START to scan</div>
+    <button data-sentry-element="GameWaitingScreenGameActionButtonStyled" onclick="scan(this)">Start</button></div>`));
+}
+function scan(btn) {
+  const cfg = {easy: [10, 1, 1], medium: [20, 1, 2], hard: [30, 2, 2]}[DIFF];
+  const pool = ['invalid_time','invalid_event_type','missing_sector','missing_status','invalid_sector','invalid_status'];
+  const pick = n => { const out = []; while (out.length < n) { const e = pool[rnd(6)]; if (out.includes(e)) continue; if ((e === 'missing_sector' && out.includes('invalid_sector')) || (e === 'invalid_sector' && out.includes('missing_sector')) || (e === 'missing_status' && out.includes('invalid_status')) || (e === 'invalid_status' && out.includes('missing_status'))) continue; out.push(e); } return out; };
+  const errIdx = new Set(); while (errIdx.size < 2) errIdx.add(rnd(cfg[0]));
+  const order = [...errIdx].sort((a, b) => a - b);
+  logs = [...Array(cfg[0]).keys()].map(i => errIdx.has(i) ? genLog(pick(order.indexOf(i) === 0 ? cfg[1] : cfg[2])) : genLog([]));
+  selected = new Set();
+  const content = btn.closest('[data-sentry-element=ApplicationContentStyled]');
+  content.innerHTML = `<div class="game-container"><div class="scan-content"><div class="log-output"><div class="log-header">[SCAN LOGS OUTPUT]</div><div class="log-entries"></div></div>
+     <div class="selection-panel-bottom"><div class="selection-info-row"><span class="info-label">Selected:</span><span class="info-value">0 / 2</span></div>
+     <div class="instructions-bottom">Select 2 log entries that contain format violations.</div>
+     <button class="confirm-button" disabled onclick="confirmSelection(this)">Confirm Selection</button></div></div></div>`;
+  const box = content.querySelector('.log-entries');
+  let i = 0;
+  const timer = setInterval(() => { if (i >= logs.length) return clearInterval(timer); const idx = i++;
+    const e = el(`<div class="log-entry log-entry-appearing"><input type="checkbox"><span class="log-line">${logs[idx].line}</span></div>`);
+    e.onclick = () => { if (selected.has(idx)) selected.delete(idx); else if (selected.size < 2) selected.add(idx); e.classList.toggle('selected', selected.has(idx));
+      content.querySelector('.info-value').textContent = `${selected.size} / 2`; content.querySelector('.confirm-button').disabled = selected.size !== 2; };
+    box.append(e); }, 30);
+}
+let fixes = {};
+function confirmSelection(btn) {
+  const content = btn.closest('[data-sentry-element=ApplicationContentStyled]');
+  const sel = [...selected].sort((a, b) => a - b);
+  fixes = Object.fromEntries(sel.map(i => [i, new Set()]));
+  content.innerHTML = `<div class="game-container"><div class="format-reference"><div class="reference-title">Expected log entry format</div></div>
+    <div class="analysis-container">${sel.map((i, n) => `<div class="error-analysis-block" data-i="${i}"><div class="error-header">Error ${n + 1}</div>
+      <div class="log-line-display">${logs[i].line}</div><button class="fix-error-button" onclick="this.nextElementSibling.style.display='block'">Fix Error</button>
+      <div class="error-types" style="display:none">${Object.entries(LABELS).map(([k, l]) => `<button class="error-type-button " data-k="${k}" onclick="toggleFix(this, ${i})">${l}</button>`).join('')}</div></div>`).join('')}</div>
+    <div class="game-footer"><button class="confirm-button" onclick="confirmFixes(this)">Confirm Fixes</button></div></div>`;
+}
+function toggleFix(b, i) { const k = b.dataset.k; if (fixes[i].has(k)) fixes[i].delete(k); else fixes[i].add(k); b.classList.toggle('selected', fixes[i].has(k)); }
+function confirmFixes(btn) {
+  if (!Object.values(fixes).every(s => s.size > 0)) return;
+  btn.closest('.game-container').innerHTML = `<div class="verification-container"><div class="log-comparison"></div><button class="scan-button" onclick="rescan(this)">Run Re-scan</button></div>`;
+}
+async function rescan(btn) {
+  let ok = true;
+  for (const [i, s] of Object.entries(fixes)) { const e = new Set(logs[i].errors); if (!logs[i].errors.length || e.size !== s.size || [...s].some(x => !e.has(x))) ok = false; }
+  const c = btn.closest('.verification-container');
+  if (ok) { await fetch('/api/user-daily-claim', {method: 'POST'}); window.__mock.claims++; c.innerHTML = '<div class="result-screen success"><div class="result-message">All format violations have been resolved</div></div>'; }
+  else { window.__mock.mismatches++; c.innerHTML = '<div class="result-screen failed"><div class="result-message">Try re-scanning the logs.</div><button class="retry-button" onclick="retryLogs(this)">Retry</button></div>'; }
+}
+function retryLogs(btn) { const content = btn.closest('[data-sentry-element=ApplicationContentStyled]'); content.innerHTML = '<button data-sentry-element="GameWaitingScreenGameActionButtonStyled" onclick="scan(this)">Start</button>'; }
+
+// ---------------- ICE WALL Break ----------------
+const RH = 54, HW = 31.5, ROWS = 10;
+const GLYPHS = ['M10 20L20 10L30 20Z', 'M12 12H28V28H12Z', 'M20 8L32 30H8Z', 'M10 10L30 30M30 10L10 30', 'M20 6V34M6 20H34', 'M14 14L26 26L14 26Z'];
+let ice = null;
+function cellXY(r, k) { const x = 283.5 - HW * r + HW * k; const up = k % 2 === 0; return {x, y: RH * r, up}; }
+function newIceRound() {
+  const cells = [];
+  for (let r = 0; r < ROWS; r++) for (let k = 0; k <= 2 * r; k++) cells.push({r, k, g: rnd(GLYPHS.length), revealed: false});
+  // motif : deux triangles pointe en haut sur une rangée, un en dessous au centre (+ variante avec un triangle pointe en bas)
+  const shapes = [[[0, 0], [0, 2], [1, 1]], [[0, 0], [1, 1], [1, 2]], [[0, 0], [1, -1], [1, 0], [1, 1]]];
+  const shape = shapes[ice ? ice.done % shapes.length : 0];
+  const glyphs = shape.map(() => rnd(GLYPHS.length));
+  const fits = (r0, k0) => shape.every(([dr, dk]) => { const r = r0 + dr, k = k0 + dk + dr; return r < ROWS && k >= 0 && k <= 2 * r; });
+  let r0, k0; do { r0 = rnd(ROWS - 1); k0 = rnd(2 * r0 + 1); } while (!fits(r0, k0) || k0 % 2 !== 0);
+  const at = (r, k) => cells.find(c => c.r === r && c.k === k);
+  shape.forEach(([dr, dk], i) => { at(r0 + dr, k0 + dk + dr).g = glyphs[i]; });
+  // unicité : on casse les autres occurrences
+  for (const c of cells) { if (c.r === r0 && c.k === k0) continue; if (c.k % 2 !== k0 % 2) continue;
+    const pts = shape.map(([dr, dk]) => at(c.r + dr, c.k + dk + dr)); if (pts.every((p, i) => p && p.g === glyphs[i])) { const own = new Set(shape.map(([dr, dk]) => at(r0 + dr, k0 + dk + dr))); const victim = pts.find(p => !own.has(p)); victim.g = (victim.g + 1) % GLYPHS.length; } }
+  return {cells, shape, glyphs, r0, k0};
+}
+function anchorOf(shape) {
+  const pts = shape.map(([dr, dk]) => ({row: dr, col: dk + dr, up: (dk + dr) % 2 === 0}));
+  const bottom = Math.max(...pts.map(p => p.row));
+  let pool = pts.map((p, i) => i).filter(i => pts[i].row === bottom);
+  const ups = pool.filter(i => pts[i].up); if (ups.length) pool = ups;
+  const mean = pool.reduce((a, i) => a + pts[i].col, 0) / pool.length;
+  return pool.sort((a, b) => Math.abs(pts[a].col - mean) - Math.abs(pts[b].col - mean))[0];
+}
+function glyphG(transform, g, revealed) {
+  const tri = `<path d="M0 54L31.5 0L63 54Z" fill="#76C1D1" fill-opacity="0.2" stroke="#76C1D1"></path>`;
+  const paths = revealed ? GLYPHS[g].split('|').map(d => `<path d="${d}" fill="#76C1D1"></path><path d="${d} M1 1" fill="#76C1D1"></path>`).join('') : '<path d="M30 30h3v3h-3z" fill="#333"></path>';
+  return `<g transform="${transform}">${tri}${paths}</g>`;
+}
+function renderIce() {
+  const w = document.querySelector('[data-sentry-component="IceWallBreakApplication"]');
+  const preview = ice.round.shape.map(([dr, dk], i) => { const row = dr, col = dk + dr; const up = col % 2 === 0; const x = HW * dk + 2 * HW, y = RH * row + (up ? 0 : RH);
+    return glyphG(up ? `translate(${x}, ${y})` : `translate(${x}, ${y}) scale(1, -1)`, ice.round.glyphs[i], true); }).join('');
+  w.querySelector('[data-sentry-component="TargetPreview"]').innerHTML = preview;
+  const layer = w.querySelector('[data-sentry-component="WallBoard"] > g');
+  layer.innerHTML = ice.round.cells.map((c, i) => { const {x, y, up} = cellXY(c.r, c.k);
+    return `<g class="cell" data-i="${i}">${glyphG(up ? `translate(${x}, ${y})` : `translate(${x}, ${y + RH}) scale(1, -1)`, c.g, c.revealed)}</g>`; }).join('');
+  w.querySelector('.counter').textContent = `${ice.done} / 3`;
+}
+function openIce(onDone) {
+  ice = {done: 0, round: null};
+  ice.round = newIceRound();
+  openWindow('019c8f2a-1111-7ff2-9a3a-e2af7c359c5f', 'ICE WALL Break', el(`<div data-sentry-component="IceWallBreakApplication">
+     <div>SÉQUENCE CIBLE <span class="counter">0 / 3</span></div>
+     <svg data-sentry-component="TargetPreview" viewBox="0 -2 200 120" width="200" height="120"></svg>
+     <svg data-sentry-component="WallBoard" data-component-name="WallBoard" viewBox="0 0 717 564" width="717" height="564"><g transform="translate(12,12)"></g></svg></div>`));
+  renderIce();
+  const w = document.querySelector('[data-sentry-component="IceWallBreakApplication"]');
+  w.querySelector('[data-sentry-component="WallBoard"]').addEventListener('click', ev => {
+    const g = ev.target.closest('g.cell'); if (!g) return;
+    const c = ice.round.cells[+g.dataset.i]; if (!c.revealed) return;
+    const a = anchorOf(ice.round.shape); const [adr, adk] = ice.round.shape[a];
+    const r0 = c.r - adr, k0 = c.k - adk - adr;
+    const ok = r0 === ice.round.r0 && k0 === ice.round.k0;
+    window.__mock.logs.push(`click ${c.r},${c.k} -> ${ok ? 'match' : 'mismatch'}`);
+    if (!ok) { window.__mock.mismatches++; return; }
+    ice.done++; window.__mock.iceDone = ice.done;
+    if (ice.done >= 3) { w.closest('[data-sentry-component=AppWindow]').remove(); if (onDone) onDone(); return; }
+    ice.round = newIceRound(); renderIce(); revealLoop();
+  });
+  revealLoop();
+}
+function revealLoop() {
+  const round = ice.round;
+  const order = round.cells.map((c, i) => i).sort(() => Math.random() - 0.5);
+  let n = 0;
+  const t = setInterval(() => { if (ice.round !== round || n >= order.length) return clearInterval(t);
+    for (let j = 0; j < (params.get('reveal') === 'slow' ? 1 : 8) && n < order.length; j++) round.cells[order[n++]].revealed = true; renderIce(); }, 60);
+}
+// ---------------- Carte du réseau, 4 marchés, Terminal SAI ----------------
+// Le serveur WebSocket de test renvoie en msgpack ce que la page lui envoie en JSON.
+function emit(room, action, data) { if (window.__ws && window.__ws.readyState === 1) window.__ws.send(JSON.stringify({room, action, data})); }
+const MAINT = (params.get('maint') || '').split(',').filter(Boolean);
+const HACK = params.get('hack') || 'auto';          // auto (sans mini-jeu) | ice | none (aucun outil)
+const TASK = params.get('task') || '';              // serveur qui propose un accès par tâche
+const SERVERS = [
+  ['s-s4l1', 'RM7-S4L1', null, 'CEDRT public'], ['s-home', 'Home Server', 'm-home', 'HOME'],
+  ['s-d4rk', 'D4RK RM7MI', 'm-d4rk', 'D4RK'], ['s-srm7', 'SRM7-M', 'm-srm7', 'SOYUZ public'],
+  ['s-urm7', 'URM7-M', 'm-urm7', 'USOL public'], ['s-e1l5', 'RM7-E1L5', null, 'CEDRT public'],
+].map(([id, serverName, marketId, serverTypeName]) => ({id, serverName, marketId, serverTypeName,
+  isReachable: true, isAccessible: false, isEndpoint: serverName === 'RM7-S4L1',
+  isInMaintenance: MAINT.includes(serverName),
+  maintenanceEndsAt: MAINT.includes(serverName) ? new Date(Date.now() + 3600e3).toISOString() : null,
+  serverDefenceRate: 10}));
+const RESET_H = {'m-home': 4, 'm-d4rk': 6, 'm-srm7': 10, 'm-urm7': 8};
+const hacked = {}, grants = new Set();
+// ?jobs=1 : un job Log Download sur le marché D4RK RM7MI, cible RM7-E1L5 (accès par tâche une fois signé)
+const JOBS = {'m-home': [], 'm-d4rk': [], 'm-srm7': [], 'm-urm7': []};
+if (params.get('jobs')) JOBS['m-d4rk'].push({id: 'job-1', name: 'Log Download', jobType: 'DownloadLog', corporation: 'CEDRT',
+  relatedServers: [{serverName: 'RM7-E1L5'}], deposit: 0, reputationPenalty: 50, rewardCredits: 1389, rewardReputation: 3,
+  conditions: {items: [{type: 'AccessGrant', details: {}}]}, status: 'AVAILABLE'});
+const LOGS = [{seq: 4, message: 'Backup job finished successfully', sizeMb: 37.7, source: 'generated'},
+              {seq: 24, message: 'Disk I/O spike detected on node node-2', sizeMb: 3.52, source: 'job'},
+              {seq: 9, message: 'Backup job finished successfully', sizeMb: 3.86, source: 'generated'}];
+Object.assign(window.__mock, {endpoint: 'RM7-S4L1', contracts: [], hackClicks: 0, forceHack: 0, sai: 0, downloads: [], completed: [], deletes: 0});
+const byId = id => SERVERS.find(s => s.id === id);
+function openMap() {
+  if (document.querySelector('[data-sentry-component=NetworkMapApplication]')) return;
+  openWindow('NETWORK_MAP', 'Carte du réseau', el(`<div data-sentry-component="NetworkMapApplication">
+    <div class="nodes">${SERVERS.map(s => `<div data-onboarding-300-id="ServerItem-${s.serverName}" onclick="selectServer('${s.id}')">${s.serverName}</div>`).join('')}</div>
+    <div data-sentry-component="ServerInfoPanel" id="panel"></div></div>`));
+  emit('network-map', 'get.map', {kind: 'snapshot', state: {servers: SERVERS}});
+}
+function selectServer(id) {
+  const s = byId(id), remote = s.marketId && s.serverName !== 'Home Server';
+  document.getElementById('panel').innerHTML = `<div>${s.serverName}</div>
+    ${s.isEndpoint ? '' : `<button ${s.isInMaintenance ? 'disabled' : ''} onclick="connectTo('${id}')">Connecter</button>`}
+    ${s.serverName === 'Home Server' ? `<button onclick="openMarket('${id}')">Marché</button>` : ''}
+    ${remote && s.isEndpoint ? `<div data-component-name="MarketIconButton"><button onclick="openMarket('${id}')">$</button></div>` : ''}
+    <button data-onboarding-300-id="ServerInfoPanelLoginButton" onclick="openLogin('${id}')">Connexion</button>`;
+}
+function connectTo(id) {
+  SERVERS.forEach(x => { x.isEndpoint = x.id === id; });
+  window.__mock.endpoint = byId(id).serverName;
+  emit('network-map', 'set.endpoint', {kind: 'delta', state: {servers: SERVERS.map(x => ({id: x.id, isEndpoint: x.isEndpoint}))}});
+  selectServer(id);
+}
+function openMarket(id) {
+  const s = byId(id);
+  openWindow('MARKET', 'Market', el(`<div data-sentry-component="MarketSite"><div data-sentry-component="MarketNav">
+    <button>Marché</button><button onclick="showJobs('${s.marketId}')">Contrats</button><button>Engager</button><button>Infos</button></div></div>`));
+  emit('market', 'get.options', {marketId: s.marketId});
+}
+function showJobs(marketId) {
+  window.__mock.contracts.push(marketId);
+  renderJobs(marketId);
+  const all = JOBS[marketId];
+  emit('market', 'get.jobs', {jobs: all.filter(j => j.status === 'AVAILABLE'), recentJobs: all.filter(j => j.status !== 'AVAILABLE'),
+                              nextJobsResetAt: new Date(Date.now() + RESET_H[marketId] * 3600e3).toISOString()});
+}
+function renderJobs(marketId) {
+  const site = document.querySelector('[data-sentry-component=MarketSite]');
+  if (!site) return;
+  let body = site.querySelector('.market-body');
+  if (!body) { body = el('<div class="market-body"></div>'); site.append(body); }
+  body.innerHTML = JOBS[marketId].filter(j => j.status !== 'COMPLETED').map(j => {
+    const taken = j.status === 'TAKEN', srv = j.relatedServers[0].serverName;
+    const head = taken ? `<div>${j.name}</div><div>Temps restant 09:59</div><div>${j.canComplete ? 'PRÊT À TERMINER' : 'EN COURS'}</div>`
+                       : `<div>${j.name}</div><div>${j.corporation} · ${srv}</div><div>${j.rewardCredits.toLocaleString('en-US')} CR</div>`;
+    return `<div data-sentry-component="JobCard">${head}<div class="more" style="display:none">${j.corporation} · ${srv}</div>
+      <button data-sentry-component="Button" onclick="this.parentElement.querySelector('.more').style.display='block'">LIRE PLUS</button>
+      <button data-sentry-component="Button" onclick="openSideout('${marketId}', '${j.id}', '${taken ? 'complete' : 'sign'}')">${taken ? 'Infos' : 'Signer'}</button></div>`;
+  }).join('');
+}
+function openSideout(marketId, jobId, mode) {
+  document.querySelectorAll('[data-component-name=JobSideout]').forEach(x => x.remove());
+  const j = JOBS[marketId].find(x => x.id === jobId);
+  document.body.append(el(`<div data-component-name="JobSideout"><div>${j.name} · ${j.corporation}</div>
+    <button onclick="this.parentElement.remove()">Annuler</button>
+    <button onclick="${mode === 'sign' ? 'signJob' : 'completeJob'}('${marketId}', '${jobId}')">${mode === 'sign' ? 'Signer' : 'Terminer'}</button></div>`));
+}
+function signJob(marketId, jobId) {
+  const j = JOBS[marketId].find(x => x.id === jobId);
+  Object.assign(j, {status: 'TAKEN', canComplete: false, conditions: {items: [{type: 'AccessGrant',
+    details: {logSeqs: [24], logNames: ['Disk I/O spike detected on node node-2']}}]}});
+  grants.add(j.relatedServers[0].serverName);
+  document.querySelectorAll('[data-component-name=JobSideout]').forEach(x => x.remove());
+  emit('market', 'job.take', {status: 'ok'});
+  renderJobs(marketId);
+}
+function completeJob(marketId, jobId) {
+  const j = JOBS[marketId].find(x => x.id === jobId);
+  document.querySelectorAll('[data-component-name=JobSideout]').forEach(x => x.remove());
+  if (!j.canComplete) { window.__mock.mismatches++; emit('market', 'job.complete', {status: 'error'}); return; }
+  j.status = 'COMPLETED'; window.__mock.completed.push(jobId);
+  emit('market', 'job.complete', {status: 'ok'});
+  renderJobs(marketId);
+}
+function openLogin(id) {
+  const s = byId(id);
+  const tools = HACK === 'none' ? [] : [{moduleId: 'mod-porter', moduleName: 'PORTER-LITE', hackPower: 14, accessTypeOnHack: 'HACK'},
+                                        {moduleId: 'mod-old', moduleName: 'OLD-TOOL', hackPower: 11, accessTypeOnHack: 'HACK'}];
+  openWindow('SAI_LOGIN', 'SAI', el(`<div data-sentry-component="SaiLogin"><div>${s.serverName}</div>
+    ${TASK === s.serverName || grants.has(s.serverName) ? `<div data-component-name="SaiAccessItem" onclick="loginWithAccess()">Accès par tâche</div>` : ''}
+    ${tools.length ? `<div data-sentry-component="SaiHackTools">${tools.map(t => `<div><span onclick="hackWith('${id}', '${t.moduleName}')">${t.moduleName}</span> <span>${t.hackPower}</span></div>`).join('')}
+      <button onclick="window.__mock.forceHack++">FORCE HACK (1500 CR)</button></div>` : '<div data-sentry-component="SaiNoTools">Aucun outil compatible</div>'}</div>`));
+  emit('sai', 'get.login.status', {remainingAttempts: 3, isLocked: false, hackTools: tools, serverDefenceRate: s.serverDefenceRate,
+                                    activeAccess: hacked[id] ? {accessType: 'HACK'} : null});
+}
+function openSaiApp() {
+  document.querySelectorAll('[data-sentry-component=SaiLogin]').forEach(x => x.closest('[data-sentry-component=AppWindow]').remove());
+  window.__mock.sai++;
+  openWindow('SAI_APP', 'SAI', el(`<div data-sentry-component="ServerAdministrationInterfaceApplication">
+    <div data-sentry-component="SaiHeader"><button>RÉSUMÉ</button><button onclick="showLogs()">JOURNAUX</button></div>
+    <div class="sai-body"></div></div>`));
+}
+function showLogs() {
+  document.querySelector('.sai-body').innerHTML = `<div data-sentry-component="SaiLogs">${LOGS.map(l => `<div class="row">
+    <span>${l.message}</span> <span>${l.sizeMb} MB</span>
+    <button onclick="downloadLog(${l.seq})"><span data-sentry-component="DownloadIcon">v</span></button>
+    <button onclick="window.__mock.deletes++"><span data-sentry-component="TrashIcon">x</span></button></div>`).join('')}</div>`;
+  emit('sai', 'get.logs', {logs: LOGS});
+}
+function downloadLog(seq) {
+  window.__mock.downloads.push(seq);
+  emit('sai', 'log.download', {success: true});
+  for (const list of Object.values(JOBS)) for (const j of list)
+    if (j.status === 'TAKEN' && (j.conditions.items[0].details.logSeqs || []).includes(seq)) {
+      j.canComplete = true; emit('market', 'job.can-complete', {jobId: j.id, canComplete: true}); }
+}
+function loginWithAccess() { emit('sai', 'login.with-access', {success: true}); openSaiApp(); }
+function hackWith(id, tool) {
+  window.__mock.hackClicks++; window.__mock.lastTool = tool;
+  if (hacked[id]) return loginWithAccess();             // accès piraté encore valable : réutilisé
+  if (HACK === 'auto') { hacked[id] = true; emit('sai', 'hack.start', {autoHacked: true, accessType: 'HACK'});
+                         emit('sai', 'update', {reason: 'hack.finished'}); return; }
+  emit('sai', 'hack.start', {autoHacked: false});
+  emit('minigames', 'start.minigame', {url: 'wss://mock/games/ice-wall-break'});
+  openIce(() => { hacked[id] = true; emit('sai', 'update', {reason: 'hack.finished', success: true}); });
+}
+</script>
+</body>
+</html>

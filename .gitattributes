@@ -1,0 +1,8 @@
+# Scripts Windows : fins de ligne CRLF à la sortie du dépôt
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.py text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.html text eol=lf
+*.js text eol=lf
