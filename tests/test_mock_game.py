@@ -314,6 +314,74 @@ def test_mercs_without_any_frame_trusts_the_empty_screen(make_bot):
     assert bot.run_mercs() == "aucune expédition en cours"
 
 
+def test_job_on_unreachable_server_is_not_signed(make_bot):
+    """Route coupée vers le serveur du job (un nœud en maintenance) : on ne signe pas."""
+    bot = make_bot(extra="&jobs=1&cut=RM7-E1L5")
+    summary = bot.run_jobs()
+    assert summary.startswith("0 job(s) terminé(s)"), summary
+    assert bot.page.evaluate("JOBS['m-d4rk'][0].status") == "AVAILABLE"
+
+
+def test_job_needing_a_hack_is_not_signed(make_bot):
+    """« Access Acquisition » sur un serveur sans accès : il faudrait pirater, on ne signe pas (par défaut)."""
+    bot = make_bot(extra="&jobs=1&access=acq")
+    summary = bot.run_jobs()
+    assert summary.startswith("0 job(s) terminé(s)"), summary
+    assert bot.page.evaluate("JOBS['m-d4rk'][0].status") == "AVAILABLE" and mock(bot)["hackClicks"] == 0
+
+
+def test_job_on_a_server_already_hacked_is_done(make_bot):
+    """« Access Acquisition » sur un serveur déjà piraté : on signe, l'accès est réutilisé, rien n'est repiraté."""
+    bot = make_bot(extra="&jobs=1&access=acq&held=RM7-E1L5")
+    summary = bot.run_jobs()
+    assert summary.startswith("1 job(s) terminé(s) : Log Download (D4RK RM7MI)"), summary
+    m = mock(bot)
+    assert m["completed"] == ["job-1"] and m["downloads"] == [24] and m["hackClicks"] == 1 and m["forceHack"] == 0
+
+
+def test_job_needing_a_hack_signed_when_allowed(make_bot):
+    """sign_without_access = true : on signe quand même, puis on pirate (ici sans mini-jeu)."""
+    bot = make_bot(extra="&jobs=1&access=acq", jobs={"sign_without_access": True})
+    summary = bot.run_jobs()
+    assert summary.startswith("1 job(s) terminé(s) : Log Download (D4RK RM7MI)"), summary
+    assert mock(bot)["completed"] == ["job-1"] and mock(bot)["hackClicks"] >= 1
+
+
+def test_signed_job_blocked_by_maintenance_waits_for_its_end(make_bot, tmp_path):
+    """Job déjà signé, serveur en maintenance : on ne le tente pas, on y revient à la fin de la maintenance."""
+    state = cor3_bot.State(tmp_path / "state.json")
+    bot = make_bot(extra="&jobs=taken&maint=RM7-E1L5", state=state)
+    summary = bot.run_jobs()
+    assert "laissé de côté" in summary and "maintenance" in summary, summary
+    now = cor3_bot.utc_now()
+    retry = cor3_bot.parse_time(state.pending_jobs()["job-1"]["retry_at"])
+    assert now + dt.timedelta(minutes=55) < retry < now + dt.timedelta(minutes=70)     # fin (1 h) + 2 min
+    assert not state.market_due("D4RK RM7MI", now + dt.timedelta(minutes=30))        # minuteur : 6 h
+    assert state.market_due("D4RK RM7MI", now + dt.timedelta(minutes=70))
+    assert mock(bot)["sai"] == 0 and mock(bot)["hackClicks"] == 0
+
+
+def test_job_failing_after_signature_is_retried_soon(make_bot, tmp_path):
+    """Signé, puis connexion impossible (pas d'accès par tâche, aucun outil) : alerte, et reprise dans 30 min."""
+    state = cor3_bot.State(tmp_path / "state.json")
+    bot = make_bot(extra="&jobs=1&grant=0&hack=none", state=state)
+    with pytest.raises(cor3_bot.StepFailed, match="aucun outil") as failure:
+        bot.run_jobs()
+    assert "à finir avant" in str(failure.value)                          # l'alerte donne l'échéance
+    assert state.pending_jobs()["job-1"]["market"] == "D4RK RM7MI"
+    assert cor3_bot.parse_time(state.pending_jobs()["job-1"]["deadline"])
+    assert state.market_due("D4RK RM7MI", cor3_bot.utc_now() + dt.timedelta(minutes=31))
+
+
+def test_signed_job_is_finished_and_forgotten(make_bot, tmp_path):
+    state = cor3_bot.State(tmp_path / "state.json")
+    state.set_job_pending("job-1", "D4RK RM7MI", "Log Download", "RM7-E1L5 en maintenance")
+    bot = make_bot(extra="&jobs=taken", state=state)
+    summary = bot.run_jobs()
+    assert summary.startswith("1 job(s) terminé(s) : Log Download (D4RK RM7MI)"), summary
+    assert state.pending_jobs() == {}
+
+
 def test_job_dry_run_signs_nothing(make_bot):
     bot = make_bot(extra="&jobs=1", dry_run=True)
     summary = bot.run_jobs()

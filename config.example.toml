@@ -43,6 +43,11 @@ allow_hack = true
 # Préréglage à mettre avant de pirater, selon le type du serveur (serverTypeName, écrit dans le
 # journal à chaque piratage). Clé = nom exact ou morceau du nom ; ajoute ici ton « hack t4 ».
 hack_presets = { SOYUZ = "hack soyuz", default = "hack" }
+# Avant de signer, le bot vérifie qu'il pourra se connecter au serveur du job : contrat « Access Grant »
+# (l'accès vient avec le job) ou accès déjà acquis (serveur piraté). Un contrat « Access Acquisition » sur
+# un serveur sans accès obligerait à le pirater (ICE WALL possible, pénalité en cas d'échec) :
+# true = le signer quand même.
+sign_without_access = false
 
 [mercenaries]
 enabled = true            # suivi des expéditions en cours (répond aux événements) : ne dépense rien

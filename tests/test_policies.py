@@ -8,14 +8,25 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import cor3_bot  # noqa: E402
 
 
-def make_bot(jobs=None, mercs=None, dry_run=False):
+def make_bot(jobs=None, mercs=None, dry_run=False, servers=None):
+    """Bot sans navigateur ; la carte du réseau connaît les serveurs donnés ({nom: champs})."""
     cfg = {"general": {}, "daily": {}, "jobs": jobs or {}, "mercenaries": mercs or {}, "notify": {}}
-    return cor3_bot.Bot(None, cfg, logging.getLogger("t"), cor3_bot.GameEvents(logging.getLogger("t")), dry_run)
+    bot = cor3_bot.Bot(None, cfg, logging.getLogger("t"), cor3_bot.GameEvents(logging.getLogger("t")), dry_run)
+    servers = {"RM7-E1L5": {}, "RM7-N2ECP": {}} if servers is None else servers
+    bot.events._merge_map({"kind": "snapshot", "state": {"servers": [
+        {"id": name, "serverName": name, **fields} for name, fields in servers.items()]}})
+    return bot
 
 
-def job(jtype, deposit=0, penalty=50, server="RM7-E1L5"):
+ACCESS = {"grant": ("GrantServerAccess", "Access Grant"), "acquisition": ("GetServerAccess", "Access Acquisition")}
+
+
+def job(jtype, deposit=0, penalty=50, server="RM7-E1L5", access="grant"):
+    """Job au format v1.25.71 : condition d'accès (si serveur) + tâche principale."""
+    items = [{"type": ACCESS[access][0], "label": ACCESS[access][1], "isPrimary": False}] if server else []
+    items.append({"type": jtype, "isPrimary": True, "details": None})
     return {"name": jtype, "jobType": jtype, "deposit": deposit, "reputationPenalty": penalty,
-            "relatedServers": [{"serverName": server}] if server else []}
+            "relatedServers": [{"serverName": server}] if server else [], "conditions": {"items": items}}
 
 
 def test_default_policy_is_non_destructive():
@@ -36,6 +47,35 @@ def test_policy_opt_in():
     assert bot.job_refusal_reason(job("DecryptFile", deposit=126, server=None)) is None
     assert "pénalité" in bot.job_refusal_reason(job("DownloadLog", penalty=82))
     assert bot.job_refusal_reason(job("DownloadLog", server="RM7-N2ECP")) == "serveur exclu"
+
+
+def test_signing_requires_a_reachable_server():
+    """Avant de signer : le serveur du job doit être sur la carte, hors maintenance, et « Connecter » possible."""
+    assert "carte" in make_bot(servers={}).job_refusal_reason(job("DownloadLog"))
+    assert "absent" in make_bot(servers={"RM7-N2ECP": {}}).job_refusal_reason(job("DownloadLog"))
+    cut = make_bot(servers={"RM7-E1L5": {"canSetEndpoint": False}})
+    assert "injoignable" in cut.job_refusal_reason(job("DownloadLog"))
+    maint = make_bot(servers={"RM7-E1L5": {"canSetEndpoint": False, "isInMaintenance": True,
+                                           "maintenanceEndsAt": "2026-10-21T10:00:00.000Z"}})
+    assert "maintenance" in maint.job_refusal_reason(job("DownloadLog"))
+    # v1.25.71 : isReachable dépend du point de sortie du moment (le bot le déplace) : il ne décide de rien
+    far = make_bot(servers={"RM7-E1L5": {"isReachable": False, "canSetEndpoint": True}})
+    assert far.job_refusal_reason(job("DownloadLog")) is None
+    assert make_bot(servers={}).job_refusal_reason(job("DecryptFile", server=None)) is None   # pas de serveur
+
+
+def test_signing_requires_access_to_the_server():
+    """Avant de signer : accès donné par le job (Grant) ou déjà acquis ; sinon il faudrait pirater."""
+    none = {"RM7-E1L5": {"accessType": "none", "serverDefenceRate": 13}}
+    held = {"RM7-E1L5": {"accessType": "regular", "serverDefenceRate": 13}}
+    assert make_bot(servers=none).job_refusal_reason(job("DownloadLog", access="grant")) is None
+    assert make_bot(servers=held).job_refusal_reason(job("DownloadLog", access="acquisition")) is None
+    reason = make_bot(servers=none).job_refusal_reason(job("DownloadLog", access="acquisition"))
+    assert "pirater" in reason and "défense 13" in reason and "sign_without_access" in reason
+    allowed = make_bot({"sign_without_access": True}, servers=none)
+    assert allowed.job_refusal_reason(job("DownloadLog", access="acquisition")) is None
+    no_hack = make_bot({"sign_without_access": True, "allow_hack": False}, servers=held)
+    assert "allow_hack" in no_hack.job_refusal_reason(job("DownloadLog", access="acquisition"))
 
 
 def test_find_target_uses_sequence_for_duplicate_names():

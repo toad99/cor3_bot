@@ -10,7 +10,8 @@ Légende : ✅ vérifié en direct · 🧪 couvert par la maquette de test seule
 Ont changé : la carte du Game Center (§ 4), l'envoi de l'état des salles à la connexion (§ 3) et donc la liste
 des expéditions (§ 11), de nouveaux types de jobs (§ 7). Après correction, passage complet en `--dry-run` sans
 erreur : daily jusqu'à son état (« déjà faite »), 4 marchés, contrats et minuteurs, signature d'un job jusqu'au
-point d'arrêt, fenêtre Expéditions vide.
+point d'arrêt, fenêtre Expéditions vide. Relevé `ws_dump` à 23:44 pendant que le joueur jouait (carte, contrats,
+terminal SAI, signature, suppression de log, ajout d'IP) : § 3, 6, 7 et 8.
 
 Conclusion générale : **tout est lisible dans le DOM et dans le WebSocket**. Aucun écran utile n'est dessiné
 dans un `<canvas>` ; le son n'apporte rien (le Signal Decode joue un bruit de clavier, plus long pour L).
@@ -79,6 +80,21 @@ Champs d'un serveur (`state.servers[]`) : `id`, `serverName`, `serverTypeName` (
 « SOYUZ public »), `marketId`, `isReachable`, `isAccessible`, `accessType`, `isEndpoint` (point de sortie
 actuel), `isInMaintenance`, `maintenanceEndsAt`, `timeUntilMaintenance`, `serverDefenceRate`.
 Les deltas ne contiennent que les champs modifiés : le bot les fusionne par `id` (`GameEvents._merge_map`).
+
+v1.25.71 ✅ (relevé `ws_dump` du 21/10 à 23:44) :
+- `get.map` = `{protocol, streamId, revision, baseRevision, serverTime, kind: snapshot|delta|unchanged,
+  state: {currentEndpointId, hackTools[], servers[]}, topology: {servers[{id, serverPlace}], connections[{serverA,
+  serverB, isHidden}]}}`. `network-map:update` arrive vide (`{}`) ; le client redemande alors `get.map`.
+- Nouveaux champs de serveur : `canSetEndpoint`, `hasAdminAccess`, `isDiscovered`, `isNew`, `transitType`
+  (public / private / restricted), `serverOwner`, `faction`, `serverCluster`, `serverIp`.
+- **`isReachable` dépend du point de sortie actuel** : RM7-S4L3 est joignable depuis URM7-M, plus depuis SRM7-M.
+  Il ne dit donc pas si l'on peut aller sur un serveur. **`canSetEndpoint`** (« Connecter » possible) ne change pas
+  avec le point de sortie (faux pour 4 serveurs D4RK privés, sans accès) : c'est lui que le bot regarde.
+- **`accessType`** : `none` (aucun accès), `regular` (accès piraté, conservé) ou `admin` ; `isAccessible` vaut
+  accessType ≠ none. Le 21/10 : 31 serveurs en `regular`, dont presque tous ceux des jobs.
+- **`state.hackTools[]`** : outils de piratage du loadout actuel (`Porter-lite r4`, puissance 17,
+  `accessTypeOnHack: regular`) ; liste vide quand le loadout n'en a pas (préréglage de déchiffrement).
+- `timeUntilMaintenance` et `maintenanceEndsAt` étaient `null` partout : unité de `timeUntilMaintenance` inconnue ❓.
 
 ## 4. Daily tasks (Game Center → OPÉRATIONS QUOTIDIENNES → Open Module) ✅
 
@@ -160,6 +176,10 @@ Les deltas ne contiennent que les champs modifiés : le bot les fusionne par `id
   Recliquer l'onglet Contrats rafraîchit la liste (astuce du guide). Le bot mémorise chaque minuteur dans
   `state.json` et le mode `--auto` rouvre chaque marché à l'échéance.
 - Si `get.options` contient un `marketId`, le bot vérifie qu'il correspond à celui du serveur sur la carte ❓.
+- v1.25.71 ✅ : `get.options` = `{market: {id, marketName, marketCorp, marketServer (id du serveur), jobSection,
+  hireSection, buySection, sellSection}, reputation: {level, progress, requiredReputation, faction}, userCredits}` ;
+  « CORE Market » est celui de Home Server, puis « SOYUZ RM7 Market », « USOL RM7 Market ». L'id est dans
+  `market.id` : le contrôle du `marketId` ci-dessus ne s'applique plus.
 
 ## 7. Jobs ✅
 
@@ -172,9 +192,25 @@ Les deltas ne contiennent que les champs modifiés : le bot les fusionne par `id
 - Nouveaux types vus dans `get.jobs` en v1.25.71, jamais ouverts ❓ : `DecryptDownloadedFile` (« Data Download »,
   « Decrypt & Extract ») et `UploadFile` (« Data Upload »). Le bot les ignore (« type … non géré »). Le nom ne
   suffit pas à reconnaître un job : « Data Download » existe aussi avec un type géré (URM7-M), seul `jobType` compte.
-- Conditions d'accès (guide) : **Grant** = accès donné tant que le job est actif (`SaiAccessItem`) ;
-  **Acquisition** = il faut avoir piraté le serveur. Le nom exact du champ n'a pas été relevé : le bot cherche
-  « acquisition » / « grant » dans les conditions (`Bot.job_access`). ❓
+- v1.25.71 ✅ (relevé `ws_dump` du 21/10) : `conditions = {hasDeposit, hasRepFine, serverConfigId, items[]}`,
+  chaque élément `{type, label, isPrimary, subsystem, details}`. La tâche principale a `isPrimary: true` et
+  `type` = `jobType` ; ses `details` (cibles) n'apparaissent qu'une fois signé. Le job a aussi `features[]`
+  (les `label`), `description`, `timeToComplete` (ms, de 2 à 7 h) et, une fois signé, `endTime` (échéance).
+  En cas d'échec, chaque job coûte **soit son dépôt** (`hasDeposit`, `deposit`), **soit une amende de réputation**
+  (`hasRepFine`, `reputationPenalty`).
+- **Conditions d'accès** ✅ : `GrantServerAccess` (« Access Grant ») = l'accès vient avec le job (`SaiAccessItem`
+  une fois signé) ; `GetServerAccess` (« Access Acquisition ») = il faut un accès au serveur (déjà piraté, ou
+  pirater). Le 21/10, la plupart des jobs serveur étaient en Acquisition. Avant de signer, le bot accepte Grant,
+  ou Acquisition si la carte donne `accessType` regular / admin ; sinon il refuse (`Bot.access_problem`,
+  réglage `sign_without_access`).
+- **Déchiffrement** : le contrat annonce l'extension et une plage de chiffrement **avant la signature**
+  (`details.extensions[{ext, encryptionLevel: [min, max]}]`) : `.eb52x [4, 10]` et `.ab52p [7, 15]` sur Home Server,
+  `.eb52x [18, 25]`, `.ab52p [14, 26]`, `.xvct [22, 27]` sur les marchés distants. Une fois signé :
+  `details.files[{id, name, isDecrypted}]`. D'après le joueur, hors de Home Server c'est un pari (une fois sur deux,
+  le fichier tiré demande un meilleur module), et ce matériel n'est pas rentable à son stade. Le bot ne s'en sert
+  pas encore : il faudrait connaître le niveau maximal du module du joueur.
+- `recentJobs` contient aussi les jobs `FAILED` ; `market:job.dismiss` `{status}` les retire. Après `job.complete`,
+  le serveur pousse `market:job.completed {jobId, marketId, name, rewardCredits, rewardReputation, faction}`.
 - Signer : `JobCard` → « LIRE PLUS » → « Signer » → panneau `[data-component-name="JobSideout"]` → « Signer »
   (`market:job.take`). **Fermer le terminal SAI avant de signer un job serveur** (consigne du joueur).
 - Terminer : carte « PRÊT À TERMINER » → dernier bouton `Button` de la carte (« Infos ») → `JobSideout` →
@@ -193,6 +229,10 @@ Les deltas ne contiennent que les champs modifiés : le bot les fusionne par `id
 - Carte → serveur → « Connecter » → « Connexion » → fenêtre `SaiLogin` (WS `sai:get.login.status` :
   `remainingAttempts`, `isLocked`, `lockExpiresIn`, `hackTools[{moduleId, moduleName, hackPower,
   accessTypeOnHack}]`, `activeAccess`, `activeAccesses`, `serverDefenceRate`, `forceHack`).
+- v1.25.71 ✅ : `activeAccess` vaut `"none"` ou `"regular"`, et `activeAccesses[{id, accessType, sourceType: "hack",
+  expiresAt: null, usedAt}]` : un accès piraté n'expire pas (il se perd à la maintenance). `remainingAttempts` : 5.
+  `sai:get.summary` donne aussi `accessType`, `isInMaintenance`, `timeUntilMaintenance`, `hasLogs`, `hasFiles`,
+  `hasTransitAccess`. Signer un job pousse `sai:update {reason: "job.taken", jobId, serverId, subsystems}`.
 - Dans `SaiLogin` ✅ :
   - **accès par tâche** : `[data-component-name="SaiAccessItem"]` → `sai:login.with-access` `{success}` ;
   - **outils de piratage** : `[data-sentry-component="SaiHackTools"]`, un libellé cliquable par outil
@@ -212,8 +252,10 @@ Les deltas ne contiennent que les champs modifiés : le bot les fusionne par `id
   **L'ordre des lignes du DOM est celui du WebSocket** : la cible (`logSeqs`) se retrouve sans ambiguïté même si
   plusieurs logs ont le même nom (le guide conseille sinon « la plus petite taille »). Icônes `DownloadIcon` / `TrashIcon`.
 - Suppression ❓ : fenêtre `[data-component-name="SaiDeleteModal"]`, boutons `SaiDeleteButtons` (dernier = confirmer).
+  Réponse du serveur ✅ (Log Deletion faite à la main le 21/10) : `sai:log.delete {deletedSeq, sizeMb}`.
 - Ajout d'IP ❓ : `[data-sentry-component="SaiAddButton"]` → `SaiAddIpModal` (`SaiAddIpModalIpInput`,
   `SaiAddIpModalSaveButton`). Le panneau d'infos du job a un bouton copier par IP (guide).
+  Réponse du serveur ✅ (IP Injection faite à la main le 21/10) : `sai:transit.add {ip: {ip, description, source: "job"}}`.
 
 ## 9. ICE WALL Break (déchiffrement et piratage) ✅
 
@@ -282,9 +324,10 @@ Les deltas ne contiennent que les champs modifiés : le bot les fusionne par `id
 
 ## 13. Jamais vu en direct (à vérifier au premier passage, en `--dry-run` d'abord)
 
-- Suppression (`SaiDeleteModal`) et ajout d'IP (`SaiAddIpModal`) : jobs désactivés par défaut.
+- Suppression (`SaiDeleteModal`) et ajout d'IP (`SaiAddIpModal`) faits par le bot : les réponses du serveur sont
+  relevées (§ 8), pas les fenêtres. Jobs désactivés par défaut.
 - Fin d'un piratage par ICE WALL jusqu'à l'ouverture du terminal (`hack.finished`, puis accès réutilisé).
-- Nom exact du champ « Grant / Acquisition » dans les conditions d'un job.
+- Unité de `timeUntilMaintenance`, et valeur de `canSetEndpoint` quand un nœud de la route est en maintenance.
 - Minuteurs de Home Server et D4RK RM7MI ; comportement exact d'un marché en maintenance.
 - Engager depuis un autre marché que Home Server (`hire_market`).
 - v1.25.71 : les mini-jeux de la daily, et les Expéditions avec une expédition en cours (mise à jour de la liste

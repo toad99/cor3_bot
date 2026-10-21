@@ -31,7 +31,7 @@ Le joueur indique que les CM du Discord officiel autorisent l'automatisation. To
 
 - `cor3_bot.py`
   - configuration, journal, alertes (`Notifier` : toast Windows, Discord, ntfy) ;
-  - `State` (`state.json` : daily faite, minuteur de chaque marché, expédition en cours) ;
+  - `State` (`state.json` : daily faite, minuteur de chaque marché, jobs signés à reprendre, expédition en cours) ;
   - `GameEvents` : écoute du WebSocket socket.io/msgpack et de l'API daily, état des serveurs de la carte ;
   - `Bot`, en trois parties : `run_daily`, `run_jobs` / `run_markets` (carte, 4 marchés, maintenance, SAI,
     piratage, ICE WALL, Loadout), `run_mercs` ;
@@ -45,7 +45,7 @@ Le joueur indique que les CM du Discord officiel autorisent l'automatisation. To
 ## Commandes
 
 ```bash
-python -m pytest tests -q                 # tous les tests (≈ 2 min, Chromium headless)
+python -m pytest tests -q                 # tous les tests (≈ 5 min, Chromium headless)
 python -m pyflakes cor3_bot.py solvers.py tests tools
 python cor3_bot.py --dry-run              # sur le PC du joueur : tout lire et résoudre, ne rien valider
 python cor3_bot.py --only jobs --dry-run
@@ -68,7 +68,10 @@ python cor3_bot.py --auto                 # ce que fait la tâche horaire
   Download, signature et fin de job, Loadout/préréglages, ouverture des 4 marchés et leurs minuteurs,
   piratage sans mini-jeu, accès piraté réutilisé, mercenaire (engagement, événement, conteneur, butin).
 - Codé et testé sur la maquette seulement : boucle sur les 4 marchés, `state.json` et `--auto`,
-  repiratage après maintenance jusqu'à l'ouverture du terminal, refus des serveurs en maintenance.
+  repiratage après maintenance jusqu'à l'ouverture du terminal, refus de signer si le serveur est absent de la
+  carte, en maintenance, sans « Connecter » possible (`canSetEndpoint`) ou sans accès (`access_problem` :
+  Grant, ou accès déjà acquis ; sinon `sign_without_access`), reprise des jobs signés non terminés
+  (`pending_jobs`). Champs relevés en v1.25.71 par `ws_dump` (voir `docs/INSPECTION.md` § 3, 7, 8).
 - Jamais vu en direct : suppression (`SaiDeleteModal`), ajout d'IP (`SaiAddIpModal`), fin d'un piratage
   par ICE WALL (`hack.finished`), champ exact « Grant / Acquisition » des jobs.
 - Limite connue : ICE WALL en piratage laisse ~90 s quand la défense égale la puissance (un essai perdu

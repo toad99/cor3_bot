@@ -295,6 +295,8 @@ function revealLoop() {
 // Le serveur WebSocket de test renvoie en msgpack ce que la page lui envoie en JSON.
 function emit(room, action, data) { if (window.__ws && window.__ws.readyState === 1) window.__ws.send(JSON.stringify({room, action, data})); }
 const MAINT = (params.get('maint') || '').split(',').filter(Boolean);
+const CUT = (params.get('cut') || '').split(',').filter(Boolean);   // Connecter impossible (canSetEndpoint: false)
+const HELD = (params.get('held') || '').split(',').filter(Boolean); // accès piraté déjà acquis (accessType: regular)
 const HACK = params.get('hack') || 'auto';          // auto (sans mini-jeu) | ice | none (aucun outil)
 const TASK = params.get('task') || '';              // serveur qui propose un accès par tâche
 const SERVERS = [
@@ -302,17 +304,30 @@ const SERVERS = [
   ['s-d4rk', 'D4RK RM7MI', 'm-d4rk', 'D4RK'], ['s-srm7', 'SRM7-M', 'm-srm7', 'SOYUZ public'],
   ['s-urm7', 'URM7-M', 'm-urm7', 'USOL public'], ['s-e1l5', 'RM7-E1L5', null, 'CEDRT public'],
 ].map(([id, serverName, marketId, serverTypeName]) => ({id, serverName, marketId, serverTypeName,
-  isReachable: true, isAccessible: false, isEndpoint: serverName === 'RM7-S4L1',
+  // v1.25.71 : isReachable dépend du point de sortie actuel ; canSetEndpoint dit si « Connecter » est possible
+  isReachable: true, canSetEndpoint: !CUT.includes(serverName),
+  accessType: HELD.includes(serverName) ? 'regular' : 'none', isAccessible: HELD.includes(serverName),
+  isEndpoint: serverName === 'RM7-S4L1',
   isInMaintenance: MAINT.includes(serverName),
   maintenanceEndsAt: MAINT.includes(serverName) ? new Date(Date.now() + 3600e3).toISOString() : null,
   serverDefenceRate: 10}));
 const RESET_H = {'m-home': 4, 'm-d4rk': 6, 'm-srm7': 10, 'm-urm7': 8};
 const hacked = {}, grants = new Set();
-// ?jobs=1 : un job Log Download sur le marché D4RK RM7MI, cible RM7-E1L5 (accès par tâche une fois signé)
+HELD.forEach(n => { hacked[SERVERS.find(s => s.serverName === n).id] = true; });
+// ?jobs=1 : un job Log Download sur le marché D4RK RM7MI, cible RM7-E1L5, au format v1.25.71 : condition
+// d'accès « Access Grant » (accès par tâche une fois signé, sauf &grant=0) ou, avec &access=acq,
+// « Access Acquisition » (il faut déjà avoir l'accès, ou pirater) ; ?jobs=taken : le même, déjà signé
 const JOBS = {'m-home': [], 'm-d4rk': [], 'm-srm7': [], 'm-urm7': []};
+const GRANT = params.get('grant') !== '0';
+const ACCESS = params.get('access') === 'acq' ? {type: 'GetServerAccess', label: 'Access Acquisition'}
+                                              : {type: 'GrantServerAccess', label: 'Access Grant'};
 if (params.get('jobs')) JOBS['m-d4rk'].push({id: 'job-1', name: 'Log Download', jobType: 'DownloadLog', corporation: 'CEDRT',
   relatedServers: [{serverName: 'RM7-E1L5'}], deposit: 0, reputationPenalty: 50, rewardCredits: 1389, rewardReputation: 3,
-  conditions: {items: [{type: 'AccessGrant', details: {}}]}, status: 'AVAILABLE'});
+  timeToComplete: 3 * 3600e3, features: [ACCESS.label, 'Log Extraction', 'Log Download'],
+  conditions: {hasDeposit: false, hasRepFine: true, items: [{...ACCESS, isPrimary: false, subsystem: null, details: null},
+    {type: 'DownloadLog', label: 'Log Download', isPrimary: true, subsystem: 'logs', details: null}]},
+  status: 'AVAILABLE'});
+if (params.get('jobs') === 'taken') takeJob(JOBS['m-d4rk'][0]);
 const LOGS = [{seq: 4, message: 'Backup job finished successfully', sizeMb: 37.7, source: 'generated'},
               {seq: 24, message: 'Disk I/O spike detected on node node-2', sizeMb: 3.52, source: 'job'},
               {seq: 9, message: 'Backup job finished successfully', sizeMb: 3.86, source: 'generated'}];
@@ -328,7 +343,7 @@ function openMap() {
 function selectServer(id) {
   const s = byId(id), remote = s.marketId && s.serverName !== 'Home Server';
   document.getElementById('panel').innerHTML = `<div>${s.serverName}</div>
-    ${s.isEndpoint ? '' : `<button ${s.isInMaintenance ? 'disabled' : ''} onclick="connectTo('${id}')">Connecter</button>`}
+    ${s.isEndpoint ? '' : `<button ${s.isInMaintenance || !s.canSetEndpoint ? 'disabled' : ''} onclick="connectTo('${id}')">Connecter</button>`}
     ${s.serverName === 'Home Server' ? `<button onclick="openMarket('${id}')">Marché</button>` : ''}
     ${remote && s.isEndpoint ? `<div data-component-name="MarketIconButton"><button onclick="openMarket('${id}')">$</button></div>` : ''}
     <button data-onboarding-300-id="ServerInfoPanelLoginButton" onclick="openLogin('${id}')">Connexion</button>`;
@@ -373,11 +388,13 @@ function openSideout(marketId, jobId, mode) {
     <button onclick="this.parentElement.remove()">Annuler</button>
     <button onclick="${mode === 'sign' ? 'signJob' : 'completeJob'}('${marketId}', '${jobId}')">${mode === 'sign' ? 'Signer' : 'Terminer'}</button></div>`));
 }
+function takeJob(j) {        // une fois signé, la tâche principale révèle sa cible ; l'échéance apparaît
+  j.conditions.items.find(i => i.isPrimary).details = {logSeqs: [24], logNames: ['Disk I/O spike detected on node node-2']};
+  Object.assign(j, {status: 'TAKEN', canComplete: false, endTime: new Date(Date.now() + j.timeToComplete).toISOString()});
+  if (GRANT && j.conditions.items.some(i => i.type === 'GrantServerAccess')) grants.add(j.relatedServers[0].serverName);
+}
 function signJob(marketId, jobId) {
-  const j = JOBS[marketId].find(x => x.id === jobId);
-  Object.assign(j, {status: 'TAKEN', canComplete: false, conditions: {items: [{type: 'AccessGrant',
-    details: {logSeqs: [24], logNames: ['Disk I/O spike detected on node node-2']}}]}});
-  grants.add(j.relatedServers[0].serverName);
+  takeJob(JOBS[marketId].find(x => x.id === jobId));
   document.querySelectorAll('[data-component-name=JobSideout]').forEach(x => x.remove());
   emit('market', 'job.take', {status: 'ok'});
   renderJobs(marketId);
@@ -398,8 +415,9 @@ function openLogin(id) {
     ${TASK === s.serverName || grants.has(s.serverName) ? `<div data-component-name="SaiAccessItem" onclick="loginWithAccess()">Accès par tâche</div>` : ''}
     ${tools.length ? `<div data-sentry-component="SaiHackTools">${tools.map(t => `<div><span onclick="hackWith('${id}', '${t.moduleName}')">${t.moduleName}</span> <span>${t.hackPower}</span></div>`).join('')}
       <button onclick="window.__mock.forceHack++">FORCE HACK (1500 CR)</button></div>` : '<div data-sentry-component="SaiNoTools">Aucun outil compatible</div>'}</div>`));
-  emit('sai', 'get.login.status', {remainingAttempts: 3, isLocked: false, hackTools: tools, serverDefenceRate: s.serverDefenceRate,
-                                    activeAccess: hacked[id] ? {accessType: 'HACK'} : null});
+  emit('sai', 'get.login.status', {remainingAttempts: 5, isLocked: false, hackTools: tools, serverDefenceRate: s.serverDefenceRate,
+                                    activeAccess: hacked[id] ? 'regular' : 'none',      // format v1.25.71
+                                    activeAccesses: hacked[id] ? [{accessType: 'regular', sourceType: 'hack', expiresAt: null}] : []});
 }
 function openSaiApp() {
   document.querySelectorAll('[data-sentry-component=SaiLogin]').forEach(x => x.closest('[data-sentry-component=AppWindow]').remove());
@@ -419,7 +437,7 @@ function downloadLog(seq) {
   window.__mock.downloads.push(seq);
   emit('sai', 'log.download', {success: true});
   for (const list of Object.values(JOBS)) for (const j of list)
-    if (j.status === 'TAKEN' && (j.conditions.items[0].details.logSeqs || []).includes(seq)) {
+    if (j.status === 'TAKEN' && ((j.conditions.items.find(i => i.isPrimary).details || {}).logSeqs || []).includes(seq)) {
       j.canComplete = true; emit('market', 'job.can-complete', {jobId: j.id, canComplete: true}); }
 }
 function loginWithAccess() { emit('sai', 'login.with-access', {success: true}); openSaiApp(); }

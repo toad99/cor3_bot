@@ -185,12 +185,13 @@ def utc_now() -> dt.datetime:
 
 
 class State:
-    """Mémoire entre deux passages (state.json) : daily faite, minuteur de chaque marché,
-    expédition en cours. Le mode --auto s'en sert pour ne lancer le navigateur que si besoin."""
+    """Mémoire entre deux passages (state.json) : daily faite, minuteur de chaque marché, jobs signés
+    à reprendre, expédition en cours. Le mode --auto s'en sert pour ne lancer le navigateur que si besoin."""
 
     def __init__(self, path: Path):
         self.path = path
-        self.data: dict = {"daily_done": None, "daily_warned": None, "markets": {}, "expedition_active": False}
+        self.data: dict = {"daily_done": None, "daily_warned": None, "markets": {}, "pending_jobs": {},
+                           "expedition_active": False}
         try:
             loaded = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(loaded, dict):
@@ -201,6 +202,8 @@ class State:
             pass                                  # fichier abîmé : on repart de zéro
         if not isinstance(self.data.get("markets"), dict):
             self.data["markets"] = {}
+        if not isinstance(self.data.get("pending_jobs"), dict):
+            self.data["pending_jobs"] = {}
 
     # ----- marchés -----
     def set_market_reset(self, name: str, value: Any, now: dt.datetime | None = None) -> None:
@@ -227,6 +230,10 @@ class State:
         if not entry:
             return True
         retry = parse_time(entry.get("retry_at"))
+        if entry.get("problem") and retry and now < retry:
+            return False                          # marché lui-même indisponible (maintenance) : on attend
+        if any(p.get("market") == name for p in self.pending_due(now)):
+            return True
         if retry:
             return now >= retry
         reset = parse_time(entry.get("next_reset"))
@@ -238,6 +245,38 @@ class State:
     def next_market_time(self, name: str) -> dt.datetime | None:
         entry = self.data["markets"].get(name) or {}
         return parse_time(entry.get("retry_at")) or parse_time(entry.get("next_reset"))
+
+    # ----- jobs signés pas encore terminés -----
+    def pending_jobs(self) -> dict:
+        return self.data["pending_jobs"]
+
+    def set_job_pending(self, job_id: Any, market: str, name: str, problem: str,
+                        retry_at: dt.datetime | None = None, now: dt.datetime | None = None,
+                        deadline: dt.datetime | None = None) -> None:
+        """Job signé mais pas terminé (maintenance, route coupée, échec) : on revient sur son marché à
+        retry_at (30 min par défaut) au lieu d'attendre le renouvellement du minuteur. deadline : échéance
+        du job (pour information : un job expiré disparaît des jobs signés et sort d'ici)."""
+        now = now or utc_now()
+        self.data["pending_jobs"][str(job_id)] = {
+            "market": market, "name": name, "problem": problem,
+            "retry_at": (retry_at or now + dt.timedelta(minutes=30)).isoformat(timespec="seconds"),
+            "deadline": deadline.isoformat(timespec="seconds") if deadline else None}
+
+    def clear_job_pending(self, job_id: Any) -> None:
+        self.data["pending_jobs"].pop(str(job_id), None)
+
+    def prune_pending(self, market: str, taken_ids: set) -> None:
+        """Oublie les jobs de ce marché qui ne sont plus signés (terminés à la main, expirés ou échoués)."""
+        taken = {str(i) for i in taken_ids}
+        for job_id, entry in list(self.data["pending_jobs"].items()):
+            if entry.get("market") == market and job_id not in taken:
+                del self.data["pending_jobs"][job_id]
+
+    def pending_due(self, now: dt.datetime | None = None) -> list[dict]:
+        """Jobs signés à reprendre maintenant."""
+        now = now or utc_now()
+        return [p for p in self.data["pending_jobs"].values()
+                if isinstance(p, dict) and now >= (parse_time(p.get("retry_at")) or now)]
 
     # ----- daily (reset à 00:00 UTC) -----
     def daily_done_today(self, now: dt.datetime | None = None) -> bool:
@@ -258,7 +297,15 @@ class State:
             due["daily"] = "daily pas encore faite aujourd'hui (UTC)"
         late = [n for n in market_names(cfg) if self.market_due(n, now)]
         if late:
-            why = "minuteur échu ou inconnu : " + ", ".join(late)
+            resume = [p for p in self.pending_due(now) if p.get("market") in late]
+            timers = [n for n in late if n not in {p.get("market") for p in resume}]
+            reasons = []
+            if timers:
+                reasons.append("minuteur échu ou inconnu : " + ", ".join(timers))
+            if resume:
+                reasons.append("job signé à reprendre : "
+                               + ", ".join(f"{p.get('name')} ({p.get('market')})" for p in resume))
+            why = " ; ".join(reasons)
             if cfg["jobs"].get("enabled", False):
                 due["jobs"] = why
             elif cfg["markets"].get("enabled", True):
@@ -888,7 +935,8 @@ class Bot:
         return srv
 
     def _route_cut(self, name: str) -> Unavailable:
-        return Unavailable(f"{name} injoignable : un nœud de la route est sans doute en maintenance")
+        return Unavailable(f"{name} injoignable : « Connecter » impossible (nœud de la route en maintenance "
+                           "ou serveur fermé)")
 
     def ensure_reachable(self, name: str) -> Locator:
         """Sélectionne un serveur et s'y connecte (« Connecter » déplace le point de sortie :
@@ -898,7 +946,8 @@ class Bot:
         connect = self.button(nm, "connect")
         if connect.count():
             if not connect.first.is_enabled():
-                if (self.events.server(name) or {}).get("isReachable") is False:
+                srv = self.events.server(name) or {}
+                if srv.get("canSetEndpoint") is False or srv.get("isReachable") is False:
                     raise self._route_cut(name)
                 raise StepFailed(f"bouton Connecter inactif sur {name}")
             if self._original_endpoint is None:
@@ -998,6 +1047,8 @@ class Bot:
             job["_market"] = name
         if self.state is not None:
             self.state.set_market_reset(name, data.get("nextJobsResetAt"))
+            self.state.prune_pending(name, {j.get("id") for j in data.get("recentJobs") or []
+                                            if j.get("status") == "TAKEN"})
         taken = sum(1 for j in data.get("recentJobs") or [] if j.get("status") == "TAKEN")
         self.log.info("Marché %s : %d contrat(s) proposé(s), %d signé(s) en cours, renouvellement %s",
                       name, len(data.get("jobs") or []), taken, local_time(data.get("nextJobsResetAt")))
@@ -1153,6 +1204,8 @@ class Bot:
             raise StepFailed(f"fin de job refusée : {ev.data}")
         self.log.info("Job terminé : %s sur %s (+%s CR, +%s REP)", current["name"], market_name,
                       current.get("rewardCredits"), current.get("rewardReputation"))
+        if self.state is not None:
+            self.state.clear_job_pending(current.get("id"))
 
     def run_jobs(self, only_due: bool | None = None) -> str:
         """Pour chaque marché (config [markets] names) : ouvre l'onglet Contrats (ce qui relance son
@@ -1184,10 +1237,14 @@ class Bot:
                     if job.get("status") != "TAKEN" or job.get("id") in handled:
                         continue
                     handled.add(job.get("id"))
-                    reason = self.job_type_refusal(job) or self.server_problem(job)
-                    if reason and not job.get("canComplete"):
-                        notes.append(f"{job['name']} ({name}, signé) laissé de côté : {reason}")
+                    refusal = self.job_type_refusal(job)
+                    blocked = None if refusal else self.server_problem(job)
+                    if (refusal or blocked) and not job.get("canComplete"):
+                        reason = refusal or blocked
+                        notes.append(f"{job['name']} ({name}, signé) laissé de côté : {reason}{self.deadline_text(job)}")
                         self.log.warning("Job signé laissé de côté : %s (%s) : %s", job["name"], name, reason)
+                        if blocked:                                 # empêchement passager : on y reviendra
+                            self._job_pending(job, name, blocked, self.server_retry_at(job))
                         continue
                     try:
                         if not job.get("canComplete"):
@@ -1195,7 +1252,8 @@ class Bot:
                         self.complete_job(name, job)
                         done.append(f"{job['name']} ({name})")
                     except (StepFailed, PWTimeout) as exc:      # maintenance : on réessaiera plus tard
-                        self._job_error(exc, f"{job['name']} ({name}, signé)", job, notes, failed, soft=True)
+                        self._job_error(exc, f"{job['name']} ({name}, signé)", job, notes, failed, soft=True,
+                                        market=name)
                 # b) nouveaux jobs selon la politique
                 if name not in take_on:
                     continue
@@ -1209,18 +1267,21 @@ class Bot:
                         self.log.debug("Job ignoré %s (%s, %s) : %s", job["name"], name, self.job_server(job), reason)
                         continue
                     handled.add(job.get("id"))
+                    signed, current = False, job
                     try:
                         self.sign_job(self.open_market(name), job)
                         budget -= 1                 # compté dès la signature, même si la suite échoue
                         if self.dry_run:
                             continue
+                        signed = True
                         recent = self.load_jobs(self.open_market(name), name).get("recentJobs") or []
-                        taken = next((j for j in recent if j.get("id") == job.get("id")), job)
-                        self.perform_job(taken)
-                        self.complete_job(name, taken)
+                        current = next((j for j in recent if j.get("id") == job.get("id")), job)   # cibles, échéance
+                        self.perform_job(current)
+                        self.complete_job(name, current)
                         done.append(f"{job['name']} ({name})")
                     except (StepFailed, PWTimeout) as exc:
-                        self._job_error(exc, f"{job['name']} ({name})", job, notes, failed, soft=False)
+                        self._job_error(exc, f"{job['name']} ({name})", current, notes, failed, soft=False,
+                                        market=name if signed else None)
         finally:
             self.cleanup()
         summary = f"{len(done)} job(s) terminé(s)"
@@ -1235,8 +1296,13 @@ class Bot:
         return summary
 
     def _job_error(self, exc: Exception, label: str, job: dict, notes: list[str], failed: list[str],
-                   soft: bool) -> None:
-        """Simulation (et indisponibilité d'un job déjà signé) -> note ; le reste -> échec + alerte."""
+                   soft: bool, market: str | None = None) -> None:
+        """Simulation (et indisponibilité d'un job déjà signé) -> note ; le reste -> échec + alerte.
+        Job signé (market donné) : noté pour être repris à la fin de la maintenance, sinon dans 30 min."""
+        if market and not isinstance(exc, Simulated):
+            problem = (str(exc).splitlines() or [type(exc).__name__])[0][:200]
+            self._job_pending(job, market, problem, getattr(exc, "retry_at", None))
+            label += self.deadline_text(job)
         if isinstance(exc, Simulated) or (soft and isinstance(exc, Unavailable)):
             notes.append(f"{label} : {exc}")
             self.log.warning("Job %s : %s", label, exc)
@@ -1275,22 +1341,76 @@ class Bot:
             return "serveur exclu"
         if problem := self.server_problem(job):
             return problem
-        if self.job_access(job) == "acquisition" and not jcfg.get("allow_hack", True):
-            return "il faut pirater le serveur (allow_hack = false)"
+        if problem := self.access_problem(job):
+            return problem
         return None
 
-    def server_problem(self, job: dict) -> str | None:
-        """Serveur du job en maintenance d'après la carte (on ne signe pas, on ne commence pas)."""
+    def access_problem(self, job: dict) -> str | None:
+        """Pourra-t-on se connecter au serveur du job ? (contrat et carte, relevés en v1.25.71)
+        « Access Grant » : l'accès vient avec le job. « Access Acquisition » : il faut un accès déjà acquis
+        (accessType regular / admin, réutilisé par l'outil du loadout), sinon pirater : refusé par défaut."""
         server = self.job_server(job)
-        srv = self.events.server(server) if server else None
-        if srv and srv.get("isInMaintenance"):
+        access = self.job_access(job)
+        if not server or access == "grant":
+            return None
+        jcfg = self.cfg["jobs"]
+        if not jcfg.get("allow_hack", True):
+            return "il faut pirater le serveur ou réutiliser un accès piraté (allow_hack = false)"
+        srv = self.events.server(server) or {}
+        if srv.get("accessType") in ("regular", "admin"):
+            return None
+        if jcfg.get("sign_without_access", False):
+            return None
+        return (f"il faudrait pirater {server} (aucun accès, défense {srv.get('serverDefenceRate', '?')}) : "
+                "refusé tant que sign_without_access = false")
+
+    def server_problem(self, job: dict) -> str | None:
+        """Serveur du job impossible à atteindre d'après la carte : carte pas reçue, serveur absent, en
+        maintenance ou route coupée. On ne signe pas ; un job déjà signé attend (state.json).
+        Ne dit pas si on pourra s'y connecter (accès par tâche, piratage) : ça se voit au terminal SAI."""
+        server = self.job_server(job)
+        if not server:
+            return None                                   # déchiffrement : rien à atteindre
+        if not self.events.servers:
+            return "carte du réseau pas encore reçue"
+        srv = self.events.server(server)
+        if srv is None:
+            return f"{server} absent de la carte (pas encore découvert ?)"
+        if srv.get("isInMaintenance"):
             return f"{server} en maintenance jusqu'à {local_time(srv.get('maintenanceEndsAt'))}"
+        # v1.25.71 : isReachable dépend du point de sortie du moment (que le bot déplace) ; canSetEndpoint
+        # dit si « Connecter » est possible, et c'est ce que fait le bot avant d'ouvrir le terminal.
+        if srv.get("canSetEndpoint") is False:
+            return str(self._route_cut(server))
         return None
+
+    def server_retry_at(self, job: dict) -> dt.datetime | None:
+        """Fin de maintenance du serveur du job (+ 2 min) : l'heure à laquelle y revenir."""
+        srv = self.events.server(self.job_server(job) or "") or {}
+        ends = parse_time(srv.get("maintenanceEndsAt")) if srv.get("isInMaintenance") else None
+        return ends + dt.timedelta(minutes=2) if ends else None
+
+    def _job_pending(self, job: dict, market: str, problem: str, retry_at: dt.datetime | None = None) -> None:
+        """Job signé pas terminé : noté dans state.json pour que --auto revienne sur son marché."""
+        if self.state is not None and job.get("id"):
+            self.state.set_job_pending(job["id"], market, job.get("name") or "?", problem, retry_at,
+                                       deadline=parse_time(job.get("endTime")))
+
+    @staticmethod
+    def deadline_text(job: dict) -> str:
+        """Échéance d'un job signé (endTime, v1.25.71), pour les alertes : passé ce délai, c'est la pénalité."""
+        return f" [à finir avant {local_time(job['endTime'])}]" if parse_time(job.get("endTime")) else ""
 
     @staticmethod
     def job_access(job: dict) -> str | None:
-        """Condition d'accès du job (guide) : « grant » = accès donné tant que le job est actif,
-        « acquisition » = il faut avoir piraté le serveur. Lecture tolérante des conditions."""
+        """Condition d'accès du job : « grant » = accès donné tant que le job est actif (GrantServerAccess),
+        « acquisition » = il faut avoir piraté le serveur (GetServerAccess), relevés en v1.25.71.
+        Sinon, lecture tolérante des conditions."""
+        types = {str(i.get("type")) for i in (job.get("conditions") or {}).get("items") or [] if isinstance(i, dict)}
+        if "GetServerAccess" in types:
+            return "acquisition"
+        if "GrantServerAccess" in types:
+            return "grant"
         blob = json.dumps(job.get("conditions") or {}, default=str).lower()
         if "acquisition" in blob or "acquire" in blob:
             return "acquisition"

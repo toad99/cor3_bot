@@ -33,8 +33,13 @@ Un marché en maintenance est retenté à la fin de la maintenance (minuteur rou
 
 ### Maintenance et repiratage
 
-Un serveur en maintenance (ou derrière un nœud en maintenance) est évité : ses jobs ne sont pas signés et
-un job déjà signé est retenté au passage suivant. Après une maintenance, l'accès piraté est perdu : le bot
+Avant de signer un job, le bot vérifie sur la carte que son serveur y figure, n'est pas en maintenance et
+qu'on peut s'y rendre (« Connecter »), puis qu'il pourra s'y connecter : contrat « Access Grant » (l'accès
+vient avec le job) ou accès déjà acquis. Un contrat « Access Acquisition » sur un serveur jamais piraté est
+refusé, sauf si tu mets `sign_without_access = true` (il faudra alors le pirater, ICE WALL compris).
+Un job déjà signé qu'on ne peut pas finir tout de suite (maintenance, échec) est noté dans `state.json` : la
+tâche horaire revient sur son marché à la fin de la maintenance, ou 30 min après un échec, sans attendre le
+minuteur. Après une maintenance, l'accès piraté est perdu : le bot
 remet le préréglage de piratage adapté (`hack_presets`), clique ton outil le plus puissant, et si le jeu
 lance ICE WALL, le résout. Un ICE WALL raté verrouille le mini-jeu 20 minutes (déchiffrement compris).
 
@@ -54,7 +59,7 @@ lance ICE WALL, le résout. Un ICE WALL raté verrouille le mini-jeu 20 minutes 
 3. Ouvre `config.toml` et vérifie au minimum `profile_dir`, la liste `[markets] names` (retire un marché pas
    encore débloqué), les noms de tes préréglages Loadout (`decrypt_presets`, `hack_presets`, `restore_preset`)
    et ce que tu autorises. **Si tu avais déjà un `config.toml`**, recopie-y les nouvelles sections
-   `[markets]`, `[auto]` et les lignes `allow_hack`, `hack_presets`, `hire_market`.
+   `[markets]`, `[auto]` et les lignes `allow_hack`, `hack_presets`, `sign_without_access`, `hire_market`.
 4. Connecte le profil dédié (tu tapes toi-même tes identifiants, le script ne les voit jamais) :
    ```bat
    python cor3_bot.py --login
@@ -104,7 +109,8 @@ d'été (2 h 15 n'existe pas), la tâche part à 3 h grâce à « dès que possi
 ## Alertes et journal
 
 - Journal du jour : `logs\cor3_AAAA-MM-JJ.log` ; historique d'une ligne par exécution : `logs\history.jsonl`.
-- État entre deux passages : `state.json` (daily faite, échéance de chaque marché, expédition en cours).
+- État entre deux passages : `state.json` (daily faite, échéance de chaque marché, jobs signés à reprendre,
+  expédition en cours).
   Le supprimer ne casse rien : le prochain passage revisite tout.
 - En cas d'échec : capture d'écran + HTML dans `logs\debug\` (utile si le jeu change).
 - Code de sortie visible dans le Planificateur (« Résultat de la dernière exécution ») :

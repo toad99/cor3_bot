@@ -77,6 +77,37 @@ def test_due_and_auto_decision(tmp_path):
     assert cor3_bot.auto_decision(config, state, later, idle_s=None, only=["mercs"])[0] == ["mercs"]
 
 
+def test_signed_job_brings_its_market_back(tmp_path):
+    """Job signé pas terminé : --auto revient sur son marché à l'heure de reprise, sans attendre le minuteur."""
+    state = cor3_bot.State(tmp_path / "state.json")
+    for name in cor3_bot.DEFAULT_MARKETS:
+        state.set_market_reset(name, NOW + dt.timedelta(hours=6), now=NOW)
+    state.mark_daily_done(NOW)
+    state.set_job_pending("job-1", "D4RK RM7MI", "Log Download", "RM7-E1L5 en maintenance",
+                          NOW + dt.timedelta(hours=1), now=NOW)
+    assert not state.market_due("D4RK RM7MI", NOW + dt.timedelta(minutes=59))
+    assert state.market_due("D4RK RM7MI", NOW + dt.timedelta(hours=1))
+    assert not state.market_due("SRM7-M", NOW + dt.timedelta(hours=1))
+    parts, why = cor3_bot.auto_decision(cfg(), state, NOW + dt.timedelta(hours=1), idle_s=None)
+    assert parts == ["jobs"] and "Log Download (D4RK RM7MI)" in why and "minuteur" not in why
+    state.save()
+    again = cor3_bot.State(tmp_path / "state.json")
+    assert again.pending_jobs()["job-1"]["problem"] == "RM7-E1L5 en maintenance"
+    again.prune_pending("D4RK RM7MI", {"job-1"})                # toujours signé : on le garde
+    assert again.market_due("D4RK RM7MI", NOW + dt.timedelta(hours=1))
+    again.prune_pending("D4RK RM7MI", set())                    # plus signé : terminé à la main ou expiré
+    assert not again.market_due("D4RK RM7MI", NOW + dt.timedelta(hours=1))
+    again.set_job_pending("job-2", "URM7-M", "Data Download", "échec", now=NOW)      # 30 min par défaut
+    assert not again.market_due("URM7-M", NOW + dt.timedelta(minutes=29))
+    assert again.market_due("URM7-M", NOW + dt.timedelta(minutes=30))
+    again.clear_job_pending("job-2")
+    assert not again.market_due("URM7-M", NOW + dt.timedelta(minutes=30))
+    # le marché lui-même en maintenance prime sur le job à reprendre (pas de passage inutile)
+    state.set_market_retry("D4RK RM7MI", NOW + dt.timedelta(hours=2), "D4RK RM7MI en maintenance", now=NOW)
+    assert not state.market_due("D4RK RM7MI", NOW + dt.timedelta(hours=1))
+    assert state.market_due("D4RK RM7MI", NOW + dt.timedelta(hours=2))
+
+
 def test_in_hours():
     at = lambda h: dt.datetime(2026, 10, 21, h, 30)  # noqa: E731
     assert cor3_bot.in_hours([0, 24], at(3))
@@ -114,7 +145,9 @@ def test_lock_ignores_dead_process(tmp_path):
 def make_bot(jobs=None):
     config = cfg(jobs=jobs or {})
     log = logging.getLogger("t")
-    return cor3_bot.Bot(None, config, log, cor3_bot.GameEvents(log), False)
+    bot = cor3_bot.Bot(None, config, log, cor3_bot.GameEvents(log), False)
+    bot.events._merge_map({"kind": "snapshot", "state": {"servers": [{"id": "w3l1", "serverName": "RM7-W3L1"}]}})
+    return bot
 
 
 def test_hack_presets_by_server_type():
@@ -127,12 +160,19 @@ def test_hack_presets_by_server_type():
 
 
 def test_job_access_condition_and_allow_hack():
+    """Conditions d'accès relevées en v1.25.71 (GetServerAccess / GrantServerAccess)."""
     acquisition = {"name": "Log Download", "jobType": "DownloadLog", "relatedServers": [{"serverName": "RM7-W3L1"}],
-                   "conditions": {"items": [{"type": "AccessAcquisition", "details": {"logSeqs": [3]}}]}}
-    grant = {**acquisition, "conditions": {"items": [{"type": "AccessGrant"}]}}
+                   "conditions": {"items": [
+                       {"type": "GetServerAccess", "label": "Access Acquisition", "isPrimary": False, "details": None},
+                       {"type": "DownloadLog", "label": "Log Download", "isPrimary": True, "details": {"logSeqs": [3]}}]}}
+    grant = {**acquisition, "conditions": {"items": [{"type": "GrantServerAccess", "label": "Access Grant"}]}}
     assert cor3_bot.Bot.job_access(acquisition) == "acquisition"
     assert cor3_bot.Bot.job_access(grant) == "grant"
-    assert make_bot().job_refusal_reason(acquisition) is None
+    assert cor3_bot.Bot.job_access({"conditions": {"items": [{"type": "AccessAcquisition"}]}}) == "acquisition"
+    assert cor3_bot.Bot.job_details(acquisition) == {"logSeqs": [3]}       # la condition d'accès n'a pas de détails
+    bot = make_bot()
+    bot.events.servers["w3l1"]["accessType"] = "regular"                  # serveur déjà piraté
+    assert bot.job_refusal_reason(acquisition) is None
     assert "allow_hack" in make_bot({"allow_hack": False}).job_refusal_reason(acquisition)
     assert make_bot({"allow_hack": False}).job_refusal_reason(grant) is None
 
@@ -142,7 +182,8 @@ def test_server_in_maintenance_from_map_events():
     bot.events._merge_map({"kind": "snapshot", "state": {"servers": [
         {"id": "a", "serverName": "RM7-E1L5", "isInMaintenance": False},
         {"id": "b", "serverName": "SRM7-M", "isEndpoint": True}]}})
-    job = {"name": "Log Download", "jobType": "DownloadLog", "relatedServers": [{"serverName": "RM7-E1L5"}]}
+    job = {"name": "Log Download", "jobType": "DownloadLog", "relatedServers": [{"serverName": "RM7-E1L5"}],
+           "conditions": {"items": [{"type": "GrantServerAccess", "label": "Access Grant", "isPrimary": False}]}}
     assert bot.job_refusal_reason(job) is None
     bot.events._merge_map({"kind": "delta", "state": {"servers": [
         {"id": "a", "isInMaintenance": True, "maintenanceEndsAt": "2026-10-21T10:00:00.000Z"}]}})
