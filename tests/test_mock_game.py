@@ -144,6 +144,7 @@ def test_log_integrity(make_bot, difficulty):
     result = bot.run_daily()
     assert result == "System Log Integrity réussi"
     assert bot.page.evaluate("window.__mock.claims") == 1
+    assert bot.page.evaluate("window.__mock.wrongModule") == 0      # pas la carte Tower Defense
 
 
 def test_ice_wall_single_anchor_clicks(make_bot):
@@ -161,6 +162,22 @@ def test_ws_decoding_and_session_loss(make_bot):
     bot.events._on_frame("in", msgpack.packb({"type": 2, "nsp": "/", "data": ["session-replaced", {"message": "x"}]}))
     with pytest.raises(cor3_bot.SessionLost):
         bot.check_session()
+
+
+def test_ws_frames_are_logged_without_their_content(caplog):
+    """Journal DEBUG : le nom de chaque trame (salle:action), pour diagnostiquer une nouvelle version du jeu,
+    mais jamais son contenu."""
+    log = logging.getLogger("cor3-test")
+    caplog.set_level(logging.DEBUG, logger="cor3-test")
+    events = cor3_bot.GameEvents(log)
+    jwt = "eyJhbGciOiJIUzI1.eyJzdWIiOiIxMjM0.SflKxwRJSMeKKF2"
+    events._on_frame("out", msgpack.packb({"type": 2, "nsp": "/", "data": [
+        "expeditions", {"event": {"name": "expeditions", "action": "get.active"}, "data": {"token": jwt}}]}))
+    events._on_frame("in", msgpack.packb({"type": 2, "nsp": "/", "data": [
+        "connected", {"message": "Connection established", "frontendVersion": "v1.25.71"}]}))
+    assert "WS → expeditions:get.active" in caplog.text
+    assert "WS ← connected" in caplog.text
+    assert jwt not in caplog.text and "v1.25.71" not in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +289,15 @@ def test_job_on_remote_market_end_to_end(make_bot, tmp_path):
     assert m["downloads"] == [24] and m["completed"] == ["job-1"], m
     assert m["mismatches"] == 0 and m["deletes"] == 0 and m["hackClicks"] == 0
     assert m["endpoint"] == "RM7-S4L1"
+
+
+def test_mercs_without_expedition(make_bot, tmp_path):
+    """v1.25.71 : sans expédition, pas de trame get.active à l'ouverture ; l'état vide de l'écran fait foi."""
+    state = cor3_bot.State(tmp_path / "state.json")
+    state.set_expedition(True)                              # passage précédent : expédition en cours
+    bot = make_bot(state=state)
+    assert bot.run_mercs() == "aucune expédition en cours"
+    assert state.data["expedition_active"] is False         # --auto ne relancera pas mercs pour rien
 
 
 def test_job_dry_run_signs_nothing(make_bot):

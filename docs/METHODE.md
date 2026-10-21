@@ -66,7 +66,9 @@ conversation.
 
 ## 5. Après une mise à jour du jeu
 
-1. Le journal signale une version de frontend différente de `TESTED_FRONTEND`.
+1. Le journal signale une version de frontend différente de `TESTED_FRONTEND`. Le journal du jour contient
+   aussi, au niveau DEBUG, le nom de chaque trame WebSocket (`WS ← salle:action`, `WS → …`, jamais le
+   contenu) : une action renommée se repère en le comparant au § 3 d'`INSPECTION.md`.
 2. `python cor3_bot.py --dry-run` : le bot lit et résout tout mais ne valide rien ; en cas d'échec, capture
    d'écran + HTML dans `logs/debug/`.
 3. Comparer le HTML de `logs/debug/` (ou un `ws_dump`) avec `docs/INSPECTION.md`, corriger le sélecteur,

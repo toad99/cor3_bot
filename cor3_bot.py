@@ -445,6 +445,8 @@ class GameEvents:
         if isinstance(body, dict) and isinstance(body.get("event"), dict):
             action = body["event"].get("action")
             payload_data = body.get("data")
+        if room is not None:     # nom seulement, jamais le contenu : sert à suivre une nouvelle version du jeu
+            self.log.debug("WS %s %s", "←" if direction == "in" else "→", f"{room}:{action}" if action else room)
         if room == "session-replaced" and direction == "in":
             self.session_lost = True
             self.log.error("Le serveur signale « session-replaced » : un autre onglet/appareil a pris la main.")
@@ -664,7 +666,9 @@ class Bot:
         gc = self.window(comp("GameCenterApplication"))
         gc.wait_for(timeout=15000)
         title = gc.get_by_text(rx(TXT["daily_card"])).first
-        card = title.locator("xpath=ancestor::div[.//*[normalize-space()='Open Module']][1]")
+        # Plus petit ancêtre qui contient « Open Module », quelle que soit sa balise : la carte est un
+        # <div> en v1.25.51 et un <button> en v1.25.71 (ancestor::div remontait alors jusqu'à la grille).
+        card = title.locator("xpath=ancestor::*[.//*[normalize-space()='Open Module']][1]")
         card.get_by_text(rx(TXT["open_module"])).click()
         main = self.window(comp("DailyOpsMainScreen"))
         main.wait_for(timeout=15000)
@@ -1729,8 +1733,17 @@ class Bot:
         self.close_window(comp("ExpeditionsApplication"))
         mark = self.events.mark()
         self.dock("expeditions")
-        self.window(comp("ExpeditionsApplication")).wait_for(timeout=15000)
-        ev = self.wait_event("expeditions", "get.active", mark, timeout=15)
+        win = self.window(comp("ExpeditionsApplication"))
+        win.wait_for(timeout=15000)
+        try:
+            ev = self.wait_event("expeditions", "get.active", mark, timeout=15)
+        except StepFailed:
+            # v1.25.71 (21/10/2026) : aucune trame get.active reçue à l'ouverture alors que l'écran
+            # affiche « Il n'y a aucune expédition active ». Une expédition en cours sans trame reste un échec.
+            if win.locator(comp("ExpeditionsActiveEmpty")).count():
+                self.log.info("Expéditions : aucune expédition active (lu à l'écran, pas de trame get.active)")
+                return []
+            raise
         return self._missions(ev.data)
 
     def run_mercs(self) -> str:

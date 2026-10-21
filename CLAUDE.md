@@ -73,3 +73,5 @@ python cor3_bot.py --auto                 # ce que fait la tâche horaire
   par ICE WALL (`hack.finished`), champ exact « Grant / Acquisition » des jobs.
 - Limite connue : ICE WALL en piratage laisse ~90 s quand la défense égale la puissance (un essai perdu
   au temps sur RM7-W3L1).
+- v1.25.71 vue le soir du 21/10 (premier dry-run du joueur) : la carte du Game Center (corrigé) et la fenêtre
+  Expéditions (état vide lu à l'écran, trame `get.active` absente) ont changé. Voir `docs/INSPECTION.md`.

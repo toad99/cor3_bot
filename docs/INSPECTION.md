@@ -6,6 +6,10 @@ doit pouvoir reprendre le travail à partir d'ici, sans relire l'ancienne conver
 
 Légende : ✅ vérifié en direct · 🧪 couvert par la maquette de test seulement · ❓ déduit du code du jeu ou du guide, jamais vu.
 
+**21/10/2026 au soir : frontend v1.25.71** (premier `--dry-run` sur le PC du joueur, captures `logs/debug/`).
+Ont changé : la carte du Game Center (§ 4), la fenêtre Expéditions (§ 11), de nouveaux types de jobs (§ 7).
+Sans changement : ouverture des 4 marchés, contrats et minuteurs, signature d'un job jusqu'au point d'arrêt.
+
 Conclusion générale : **tout est lisible dans le DOM et dans le WebSocket**. Aucun écran utile n'est dessiné
 dans un `<canvas>` ; le son n'apporte rien (le Signal Decode joue un bruit de clavier, plus long pour L).
 
@@ -69,6 +73,10 @@ Les deltas ne contiennent que les champs modifiés : le bot les fusionne par `id
 
 - `GameCenterApplication` → carte « OPÉRATIONS QUOTIDIENNES » → « Open Module » → `DailyOpsMainScreen`,
   bouton `DailyOpsStartButton` (« Commencer la tâche »).
+- v1.25.71 : chaque carte du Game Center est un `<button class="game-center-card">` (titre
+  `.game-center-card-title`, « Open Module » = `.game-center-card-cta`). Le bot prend le plus petit ancêtre du
+  titre **de n'importe quelle balise** qui contient « Open Module » : `ancestor::div` sautait le `<button>` et
+  remontait jusqu'à la grille, qui contient les deux cartes. La suite de la daily n'a pas encore été revue en v1.25.71.
 - Une daily par jour, tirée côté serveur, **reset à 00:00 UTC** (02:00 à Paris l'été, 01:00 l'hiver).
   `GET /api/user-daily-claim` → `{currentGameId, hasClaimedToday, currentStreak, lastClaimDate, difficulty,
   streakBonus, nextTaskTime}`. Rater un jour remet la série à zéro ; difficulté supérieure tous les 7 succès.
@@ -147,6 +155,9 @@ Les deltas ne contiennent que les champs modifiés : le bot les fusionne par `id
   `status: "TAKEN"`, `canComplete`). `recentJobs` contient aussi les jobs finis/échoués (`status` ≠ TAKEN).
 - Types : `DecryptFile` (File Decryption), `DownloadLog` (Log Download), `DownloadFile` (File Download),
   `DeleteLog` (Log Deletion), `DeleteFile` (File Elimination), `DeleteIps` (IP Cleanup), `AddIps` (IP Injection).
+- Nouveaux types vus dans `get.jobs` en v1.25.71, jamais ouverts ❓ : `DecryptDownloadedFile` (« Data Download »,
+  « Decrypt & Extract ») et `UploadFile` (« Data Upload »). Le bot les ignore (« type … non géré »). Le nom ne
+  suffit pas à reconnaître un job : « Data Download » existe aussi avec un type géré (URM7-M), seul `jobType` compte.
 - Conditions d'accès (guide) : **Grant** = accès donné tant que le job est actif (`SaiAccessItem`) ;
   **Acquisition** = il faut avoir piraté le serveur. Le nom exact du champ n'a pas été relevé : le bot cherche
   « acquisition » / « grant » dans les conditions (`Bot.job_access`). ❓
@@ -228,6 +239,12 @@ Les deltas ne contiennent que les champs modifiés : le bot les fusionne par `id
 - Suivi : fenêtre `ExpeditionsApplication`, `expeditions:get.active` (rafraîchi à chaque `update`) :
   `status` PREPARING → RUNNING ⇄ EVENT → RETURNING → COMPLETED, `outcome`, `remainingAmount`, `messages[]`
   (`messageType: DECISION`, `decisionOptions[{id, label, riskModifier, lootModifier}]`, `decisionDeadline`, `isResolved`).
+- v1.25.71, sans expédition en cours (capture du 21/10) : `ExpeditionsApplication` a trois onglets
+  (`ExpeditionsTabs` / `ExpeditionsTabItem` : « Expéditions actives », « Drone personnel », « Archives des raids ») ;
+  l'onglet actif affiche `ExpeditionsActiveEmpty` (« Il n'y a aucune expédition active »). **Aucune trame
+  `expeditions:get.active` n'a été reçue à l'ouverture** ❓ (action renommée, ou liste chargée au démarrage ?).
+  Le bot se fie alors à l'état vide de l'écran ; avec une expédition en cours, l'absence de trame reste un échec.
+  Le journal DEBUG nomme chaque trame (`WS ← salle:action`) : le prochain passage dira ce qui circule.
 - Événement : bouton `ChamferedButton` (libellé de l'option) dans `ExpeditionsEventCard` → `expeditions:respond.event`.
   Sans réponse en 5 min, le jeu choisit (`isAutoResolved`).
 - Retour : « Payer et ouvrir » (`ExpeditionsEventContainerButton`, `open.container`) puis « Tout récupérer »
@@ -255,6 +272,8 @@ Les deltas ne contiennent que les champs modifiés : le bot les fusionne par `id
 - Nom exact du champ « Grant / Acquisition » dans les conditions d'un job.
 - Minuteurs de Home Server et D4RK RM7MI ; comportement exact d'un marché en maintenance.
 - Engager depuis un autre marché que Home Server (`hire_market`).
+- v1.25.71 : la daily après le Game Center, et les Expéditions avec une expédition en cours (quelle trame
+  donne la liste et ses événements, § 11).
 
 ## 14. Ce qui a été fait sur le compte pendant l'inspection (avec l'accord du joueur)
 

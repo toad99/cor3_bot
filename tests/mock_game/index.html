@@ -20,7 +20,7 @@
 <div id="dock">
   <div data-onboarding-300-id="TabBarItem-019a0c41-b17f-7abc-1234-567890abcde2" onclick="openGameCenter()">GAME CENTER</div>
   <div data-onboarding-300-id="TabBarItem-NETWORK_MAP" onclick="openMap()">MAP</div>
-  <div data-onboarding-300-id="TabBarItem-EXPEDITIONS">EXP</div>
+  <div data-onboarding-300-id="TabBarItem-EXPEDITIONS" onclick="openExpeditions()">EXP</div>
   <div data-onboarding-300-id="LoadoutTabBarItem">LOADOUT</div>
 </div>
 <div id="windows"></div>
@@ -31,7 +31,7 @@ const DIFF = params.get('difficulty') || 'easy';
 const WS_PORT = params.get('ws');
 const SIGNAL_ID = '019aea65-b0c2-70e9-bbbc-8caed416854c';
 const LOG_ID = '019aaaaa-0000-7000-8000-00000000log1';
-window.__mock = { claims: 0, mismatches: 0, iceDone: 0, logs: [] };
+window.__mock = { claims: 0, mismatches: 0, iceDone: 0, logs: [], wrongModule: 0 };
 
 if (WS_PORT) { const ws = new WebSocket(`ws://127.0.0.1:${WS_PORT}/socket.io/?EIO=4&transport=websocket`); ws.binaryType = 'arraybuffer'; window.__ws = ws; }
 
@@ -45,11 +45,39 @@ function openWindow(appName, title, inner) {
   document.getElementById('windows').append(w);
   return w;
 }
+// Structure relevée en v1.25.71 (21/10/2026) : chaque carte est un <button>, le titre est 2 niveaux sous la carte.
 function openGameCenter() {
-  openWindow('GAME_CENTER', 'Game Center', el(`<div data-sentry-component="GameCenterApplication">
-    <div><div><div>Tower Defense</div></div><div><div>Open Module</div></div></div>
-    <div><div><div>OPÉRATIONS QUOTIDIENNES</div><div>Daily objective terminal</div></div><div><div onclick="openDaily()">Open Module</div></div></div>
+  openWindow('GAME_CENTER', 'Game Center', el(`<div data-sentry-component="GameCenterApplication" data-sentry-element="GameCenterApplicationStyled">
+    <div class="game-center-shell">
+      <div class="game-center-header"><div><div class="game-center-eyebrow">Entertainment Node</div>
+        <div class="game-center-title">Game Center</div></div><div class="game-center-status">2 Active Modules</div></div>
+      <div class="game-center-grid">
+        <button type="button" class="game-center-card" onclick="window.__mock.wrongModule++">
+          <div class="game-center-card-head"><div class="game-center-card-icon"></div><div class="game-center-card-tag">Featured</div></div>
+          <div><div class="game-center-card-title">Tower Defense</div><div class="game-center-card-description">Live tactical duel</div></div>
+          <div class="game-center-card-footer"><div class="game-center-card-meta">1v1 simulation</div><div class="game-center-card-cta">Open Module</div></div>
+        </button>
+        <button type="button" class="game-center-card" onclick="openDaily()">
+          <div class="game-center-card-head"><div class="game-center-card-icon"></div><div class="game-center-card-tag">Routine</div></div>
+          <div><div class="game-center-card-title">OPÉRATIONS QUOTIDIENNES</div><div class="game-center-card-description">Daily objective terminal</div></div>
+          <div class="game-center-card-footer"><div class="game-center-card-meta">Operations queue</div><div class="game-center-card-cta">Open Module</div></div>
+        </button>
+      </div>
+    </div>
   </div>`));
+}
+// Expéditions, relevé en v1.25.71 (21/10/2026) sans expédition en cours : l'écran affiche l'état vide et
+// le bot n'a reçu aucune trame expeditions:get.active à l'ouverture. La maquette n'en envoie donc pas.
+function openExpeditions() {
+  const tab = name => `<div data-sentry-component="ExpeditionsTabItem" data-component-name="ExpeditionsTabItem">
+     <button data-sentry-element="ExpeditionsTabItemButtonStyled">${name}</button></div>`;
+  openWindow('EXPEDITIONS', 'Expéditions', el(`<div data-sentry-component="ExpeditionsApplication" data-component-name="ExpeditionsApplication">
+    <div data-sentry-component="ExpeditionsTabs" data-component-name="ExpeditionsTabs">
+      ${tab('Expéditions actives')}${tab('Drone personnel')}${tab('Archives des raids')}</div>
+    <div data-sentry-component="ExpeditionsActiveTab" data-component-name="ExpeditionsActiveTab">
+      <div data-sentry-component="ExpeditionsActiveEmpty" data-component-name="ExpeditionsActiveEmpty">
+        <p data-sentry-element="ExpeditionsActiveEmptyTextStyled" data-component-name="ExpeditionsActiveEmptyText">Il n’y a aucune expédition active</p>
+      </div></div></div>`));
 }
 async function openDaily() {
   const state = await fetch(`/api/user-daily-claim?game=${GAME}&difficulty=${DIFF}`).then(r => r.json());
