@@ -291,13 +291,27 @@ def test_job_on_remote_market_end_to_end(make_bot, tmp_path):
     assert m["endpoint"] == "RM7-S4L1"
 
 
-def test_mercs_without_expedition(make_bot, tmp_path):
-    """v1.25.71 : sans expédition, pas de trame get.active à l'ouverture ; l'état vide de l'écran fait foi."""
+def test_mercs_without_expedition(make_bot, tmp_path, caplog):
+    """v1.25.71 : la liste (vide) arrive à la connexion, rien à l'ouverture de la fenêtre : on prend cette trame."""
+    caplog.set_level(logging.DEBUG, logger="cor3-test")
     state = cor3_bot.State(tmp_path / "state.json")
     state.set_expedition(True)                              # passage précédent : expédition en cours
     bot = make_bot(state=state)
     assert bot.run_mercs() == "aucune expédition en cours"
     assert state.data["expedition_active"] is False         # --auto ne relancera pas mercs pour rien
+    assert "lu à l'écran" not in caplog.text                # la trame de la connexion a suffi
+
+
+def test_active_expedition_known_from_connection(make_bot):
+    """v1.25.71 : une expédition en cours n'est annoncée qu'à la connexion (expeditions:get.active)."""
+    bot = make_bot(extra="&exp=running")
+    assert [m["status"] for m in bot.active_expeditions()] == ["RUNNING"]
+
+
+def test_mercs_without_any_frame_trusts_the_empty_screen(make_bot):
+    """Aucune trame get.active du tout : l'écran « Il n'y a aucune expédition active » fait foi."""
+    bot = make_bot(extra="&exp=nopush")
+    assert bot.run_mercs() == "aucune expédition en cours"
 
 
 def test_job_dry_run_signs_nothing(make_bot):

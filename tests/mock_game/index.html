@@ -33,7 +33,13 @@ const SIGNAL_ID = '019aea65-b0c2-70e9-bbbc-8caed416854c';
 const LOG_ID = '019aaaaa-0000-7000-8000-00000000log1';
 window.__mock = { claims: 0, mismatches: 0, iceDone: 0, logs: [], wrongModule: 0 };
 
-if (WS_PORT) { const ws = new WebSocket(`ws://127.0.0.1:${WS_PORT}/socket.io/?EIO=4&transport=websocket`); ws.binaryType = 'arraybuffer'; window.__ws = ws; }
+// &exp= : '' aucune expédition, 'running' une expédition en cours, 'nopush' pas de trame get.active du tout
+const EXP = params.get('exp') || '';
+const EXPEDITIONS = EXP === 'running' ? [{id: 'exp-1', status: 'RUNNING', mercenary: {callsign: 'Crimson'}, messages: []}] : [];
+if (WS_PORT) { const ws = new WebSocket(`ws://127.0.0.1:${WS_PORT}/socket.io/?EIO=4&transport=websocket`); ws.binaryType = 'arraybuffer'; window.__ws = ws;
+  // v1.25.71 : le client rejoint toutes les salles à la connexion (join-room) et le serveur répond par leur
+  // état, dont expeditions:get.active. Rien n'est envoyé ensuite à l'ouverture de la fenêtre Expéditions.
+  if (EXP !== 'nopush') ws.addEventListener('open', () => emit('expeditions', 'get.active', EXPEDITIONS)); }
 
 function el(html) { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstElementChild; }
 function openWindow(appName, title, inner) {
@@ -66,18 +72,20 @@ function openGameCenter() {
     </div>
   </div>`));
 }
-// Expéditions, relevé en v1.25.71 (21/10/2026) sans expédition en cours : l'écran affiche l'état vide et
-// le bot n'a reçu aucune trame expeditions:get.active à l'ouverture. La maquette n'en envoie donc pas.
+// Expéditions, relevé en v1.25.71 (21/10/2026) sans expédition en cours : onglets et état vide. La liste est
+// arrivée à la connexion (voir plus haut), aucune trame à l'ouverture. Avec une expédition, la structure de
+// l'onglet n'a jamais été relevée en v1.25.71 : simple texte ici.
 function openExpeditions() {
   const tab = name => `<div data-sentry-component="ExpeditionsTabItem" data-component-name="ExpeditionsTabItem">
      <button data-sentry-element="ExpeditionsTabItemButtonStyled">${name}</button></div>`;
   openWindow('EXPEDITIONS', 'Expéditions', el(`<div data-sentry-component="ExpeditionsApplication" data-component-name="ExpeditionsApplication">
     <div data-sentry-component="ExpeditionsTabs" data-component-name="ExpeditionsTabs">
       ${tab('Expéditions actives')}${tab('Drone personnel')}${tab('Archives des raids')}</div>
-    <div data-sentry-component="ExpeditionsActiveTab" data-component-name="ExpeditionsActiveTab">
-      <div data-sentry-component="ExpeditionsActiveEmpty" data-component-name="ExpeditionsActiveEmpty">
+    <div data-sentry-component="ExpeditionsActiveTab" data-component-name="ExpeditionsActiveTab">${EXPEDITIONS.length
+      ? EXPEDITIONS.map(e => `<div>${e.mercenary.callsign} : ${e.status}</div>`).join('')
+      : `<div data-sentry-component="ExpeditionsActiveEmpty" data-component-name="ExpeditionsActiveEmpty">
         <p data-sentry-element="ExpeditionsActiveEmptyTextStyled" data-component-name="ExpeditionsActiveEmptyText">Il n’y a aucune expédition active</p>
-      </div></div></div>`));
+      </div>`}</div></div>`));
 }
 async function openDaily() {
   const state = await fetch(`/api/user-daily-claim?game=${GAME}&difficulty=${DIFF}`).then(r => r.json());

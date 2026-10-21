@@ -1729,17 +1729,18 @@ class Bot:
     def _missions(data: Any) -> list[dict]:
         return [m for m in (data if isinstance(data, list) else [data] if data else []) if isinstance(m, dict)]
 
-    def active_expeditions(self) -> list[dict]:
+    def active_expeditions(self, since: int = 0) -> list[dict]:
+        """Expéditions d'après la dernière trame expeditions:get.active reçue après `since`.
+        v1.25.71 : le serveur l'envoie quand le client rejoint la salle, à la connexion ; rien n'est
+        envoyé à l'ouverture de la fenêtre (relevé du 21/10/2026)."""
         self.close_window(comp("ExpeditionsApplication"))
-        mark = self.events.mark()
         self.dock("expeditions")
         win = self.window(comp("ExpeditionsApplication"))
         win.wait_for(timeout=15000)
         try:
-            ev = self.wait_event("expeditions", "get.active", mark, timeout=15)
+            ev = self.wait_event("expeditions", "get.active", since, timeout=15)
         except StepFailed:
-            # v1.25.71 (21/10/2026) : aucune trame get.active reçue à l'ouverture alors que l'écran
-            # affiche « Il n'y a aucune expédition active ». Une expédition en cours sans trame reste un échec.
+            # Aucune trame : l'écran « Il n'y a aucune expédition active » fait foi ; sinon c'est un échec.
             if win.locator(comp("ExpeditionsActiveEmpty")).count():
                 self.log.info("Expéditions : aucune expédition active (lu à l'écran, pas de trame get.active)")
                 return []
@@ -1755,11 +1756,12 @@ class Bot:
             active = self.active_expeditions()
             # Engager (dépense de CR) : seulement au passage complet, jamais en mode --auto horaire.
             if not active and mcfg.get("hire", False) and not self.auto_mode:
+                hired_at = self.events.mark()
                 try:
                     notes.append(self.hire_mercenary())
                 finally:
                     self.restore_endpoint()
-                active = self.active_expeditions()
+                active = self.active_expeditions(since=hired_at)     # une liste plus récente que l'engagement
             if active:
                 notes.append(self.watch_expeditions(float(mcfg.get("watch_minutes", 40))))
         finally:

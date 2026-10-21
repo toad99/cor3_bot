@@ -73,5 +73,6 @@ python cor3_bot.py --auto                 # ce que fait la tâche horaire
   par ICE WALL (`hack.finished`), champ exact « Grant / Acquisition » des jobs.
 - Limite connue : ICE WALL en piratage laisse ~90 s quand la défense égale la puissance (un essai perdu
   au temps sur RM7-W3L1).
-- v1.25.71 vue le soir du 21/10 (premier dry-run du joueur) : la carte du Game Center (corrigé) et la fenêtre
-  Expéditions (état vide lu à l'écran, trame `get.active` absente) ont changé. Voir `docs/INSPECTION.md`.
+- v1.25.71 vue le soir du 21/10 (dry-run du joueur, passage complet OK après correction) : la carte du Game Center
+  est devenue un `<button>`, et l'état des salles n'est envoyé qu'à la connexion (`join-room`), dont
+  `expeditions:get.active`. Les deux sont gérés. Voir `docs/INSPECTION.md` (§ 3, 4, 11).
