@@ -665,7 +665,8 @@ class Bot:
             self.pause(250)
 
     def dock(self, key: str) -> None:
-        self.page.locator(f'[data-onboarding-300-id="{DOCK[key]}"]').click()
+        # v1.25.71 : le dock peut être masqué (fenêtre Marché ouverte en grand) : clic DOM si besoin
+        self.safe_click(self.page.locator(f'[data-onboarding-300-id="{DOCK[key]}"]').first)
         self.pause(600)
 
     def button(self, scope: Locator | Page, key_or_pattern: str) -> Locator:
@@ -1205,6 +1206,8 @@ class Bot:
         """Signe le job ; renvoie le repère des trames d'avant la signature (None en --dry-run) : le jeu
         recharge ensuite la liste de lui-même, load_jobs(since=...) la reprend."""
         self.close_window(comp("ServerAdministrationInterfaceApplication"))   # règle du guide
+        if not market.locator(comp("JobCard")).count():   # marché rouvert (après un job) sur l'onglet Marché
+            self.load_jobs(market)
         card = self.find_job_card(market, job)
         more = self.button(card, "read_more")
         if more.count():
@@ -1858,12 +1861,18 @@ class Bot:
         index = self._find_target(items, details, list_key)
         panel = sai.locator(comp("SaiLogs" if list_key == "logs" else "SaiFiles"))
         icon = "TrashIcon" if delete else "DownloadIcon"
+        panel.locator(comp("ScrollArea")).locator("button").first.wait_for(timeout=10000)
         buttons = panel.locator("button").filter(has=self.page.locator(comp(icon)))
-        buttons.nth(index).wait_for(timeout=10000)
-        # la ligne = le plus grand bloc qui ne contient que ce bouton (v1.25.71 : les boutons sont dans une
-        # cellule « Action » à part, sans le nom)
-        row = buttons.nth(index).locator(
-            f"xpath=ancestor::div[count(.//*[@data-sentry-component='{icon}'])=1][last()]")
+        if buttons.count() == len(items):
+            button = buttons.nth(index)
+        else:   # v1.25.71, FICHIERS : icônes sans nom, deux boutons par ligne (télécharger, puis supprimer)
+            pairs = panel.locator(comp("ScrollArea")).locator("button")
+            if pairs.count() != 2 * len(items):
+                raise StepFailed(f"{pairs.count()} boutons pour {len(items)} lignes dans {list_key} : rien n'est fait")
+            button = pairs.nth(2 * index + (1 if delete else 0))
+        # la ligne = le plus grand bloc qui ne contient que ses deux boutons (v1.25.71 : les boutons sont dans
+        # une cellule « Action » à part, sans le nom)
+        row = button.locator("xpath=ancestor::div[count(.//button)=2][last()]")
         label = items[index].get("message") or items[index].get("name") or ""
         if label and label[:25] not in row.inner_text():
             raise StepFailed(f"la ligne {index} ne correspond pas à « {label} » : rien n'est fait")
@@ -1871,7 +1880,7 @@ class Bot:
         if not self.allowed(f"{verb} « {label} » sur {server}"):
             return
         mark = self.events.mark()
-        buttons.nth(index).click()
+        button.click()
         if delete:      # une fenêtre de confirmation s'ouvre (non vérifié en direct)
             modal = self.page.locator(cname("SaiDeleteModal"))
             modal.wait_for(timeout=8000)
@@ -1964,7 +1973,8 @@ class Bot:
             if add:
                 if not self.allowed(f"ajouter l'IP {ip} sur {server}"):
                     continue
-                sai.locator(comp("SaiAddButton")).first.click()
+                # v1.25.71 : data-component-name="SaiAddButton" (icône AddUserIcon), au-dessus de la « Liste noire »
+                sai.locator(f'{cname("SaiAddButton")}, {comp("SaiAddButton")}').first.click()
                 modal = self.page.locator(cname("SaiAddIpModal"))
                 modal.wait_for(timeout=8000)
                 modal.locator(cname("SaiAddIpModalIpInput")).fill(ip)

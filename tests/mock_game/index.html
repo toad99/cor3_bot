@@ -327,6 +327,10 @@ if (params.get('jobs')) JOBS['m-d4rk'].push({id: 'job-1', name: 'Log Download', 
   conditions: {hasDeposit: false, hasRepFine: true, items: [{...ACCESS, isPrimary: false, subsystem: null, details: null},
     {type: 'DownloadLog', label: 'Log Download', isPrimary: true, subsystem: 'logs', details: null}]},
   status: 'AVAILABLE'});
+// ?jobs=2 : un Data Download (autre type) en plus, sur le même serveur
+if (params.get('jobs') === '2') JOBS['m-d4rk'].push({...JOBS['m-d4rk'][0], id: 'job-2', name: 'Data Download',
+  jobType: 'DownloadFile', rewardCredits: 1200, conditions: {...JOBS['m-d4rk'][0].conditions, items: [
+    JOBS['m-d4rk'][0].conditions.items[0], {type: 'DownloadFile', label: 'Data Download', isPrimary: true, subsystem: 'files', details: null}]}});
 if (params.get('jobs') === 'taken') takeJob(JOBS['m-d4rk'][0]);
 const LOGS = [{seq: 4, message: 'Backup job finished successfully', sizeMb: 37.7, source: 'generated'},
               {seq: 24, message: 'Disk I/O spike detected on node node-2', sizeMb: 3.52, source: 'job'},

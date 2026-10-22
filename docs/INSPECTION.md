@@ -274,6 +274,18 @@ v1.25.71 ✅ (relevé `ws_dump` du 21/10 à 23:44) :
   cellule Action, vide, et refusait de cliquer. Nouveau panneau à droite, `SaiSearchTools` : « Rechercher des
   outils (0) », « Faire correspondre à la liste », « Rechercher des objets de valeur », fonctions de
   correspondance et de recherche « Indisponible » (sans doute un module à équiper) ❓.
+- v1.25.71 ✅ (captures du 22/10 à 03:25–03:27) :
+  - onglets du terminal : `SaiTabStyled` avec `data-onboarding-300-id` `SaiTabs-TRANSIT`, `SaiTabs-FILES`,
+    `SaiTabs-LOGS` (« Résumé » sans id) ;
+  - **FICHIERS** (`SaiFiles`) : même tableau Nom / .type / .taille / Action, mais **les icônes des boutons n'ont
+    plus de nom** : deux boutons par ligne, télécharger puis supprimer (le rouge, `rgba(254, 73, 73)`). Bouton
+    d'envoi en haut : `SaiAddButtonStyled` avec l'icône `UploadIcon` (`data-sentry-element`). Le bot prend la
+    paire de boutons de la ligne visée et vérifie le nom du fichier sur la ligne avant de cliquer ;
+  - **ACCÈS DE TRANSIT** (`SaiTransit`) : titre « Liste noire », bouton d'ajout
+    `[data-component-name="SaiAddButton"]` (icône `AddUserIcon`), tableau Adresse IP / Durée d'accès / Action.
+    La fenêtre d'ajout (`SaiAddIpModal`) n'a pas encore été vue ❓.
+- Dock ✅ (22/10) : `LoadoutTabBarItem` existe toujours, mais le dock peut être caché (fenêtre Marché ouverte en
+  grand) : le clic normal échoue, le bot fait un clic DOM (`safe_click`).
 - Suppression ❓ : fenêtre `[data-component-name="SaiDeleteModal"]`, boutons `SaiDeleteButtons` (dernier = confirmer).
   Réponse du serveur ✅ (Log Deletion faite à la main le 21/10) : `sai:log.delete {deletedSeq, sizeMb}`.
 - Ajout d'IP ❓ : `[data-sentry-component="SaiAddButton"]` → `SaiAddIpModal` (`SaiAddIpModalIpInput`,

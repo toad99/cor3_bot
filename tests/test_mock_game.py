@@ -382,6 +382,16 @@ def test_job_failing_after_signature_is_retried_soon(make_bot, tmp_path):
     assert state.market_due("D4RK RM7MI", cor3_bot.utc_now() + dt.timedelta(minutes=31))
 
 
+def test_next_job_is_found_after_a_failure(make_bot, tmp_path):
+    """Un job échoue au terminal (le marché a été fermé) : le suivant, d'un autre type, est quand même signé
+    (le marché rouvert s'affiche sur l'onglet Marché, il faut revenir sur Contrats)."""
+    bot = make_bot(extra="&jobs=2&grant=0&hack=none", state=cor3_bot.State(tmp_path / "state.json"))
+    with pytest.raises(cor3_bot.StepFailed) as failure:
+        bot.run_jobs()
+    assert "carte introuvable" not in str(failure.value), failure.value
+    assert bot.page.evaluate("JOBS['m-d4rk'].map(j => j.status)") == ["TAKEN", "TAKEN"]
+
+
 def test_signed_job_is_finished_and_forgotten(make_bot, tmp_path):
     state = cor3_bot.State(tmp_path / "state.json")
     state.set_job_pending("job-1", "D4RK RM7MI", "Log Download", "RM7-E1L5 en maintenance")
