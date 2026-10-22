@@ -304,6 +304,16 @@ class State:
             "retry_at": (retry_at or now + JOB_RETRY).isoformat(timespec="seconds"),
             "deadline": deadline.isoformat(timespec="seconds") if deadline else None}
 
+    def note_hack_power(self, power: Any) -> None:
+        """Puissance du meilleur outil de piratage vu (tous préréglages confondus), pour refuser d'avance un
+        contrat sur un serveur trop défendu."""
+        try:
+            value = float(power)
+        except (TypeError, ValueError):
+            return
+        if value > float(self.data.get("hack_power") or 0):
+            self.data["hack_power"] = value
+
     def mark_job_lost(self, job_id: Any) -> None:
         """Job signé impossible à finir : ne plus jamais le retenter (il expirera tout seul)."""
         self.clear_job_pending(job_id)
@@ -1142,7 +1152,12 @@ class Bot:
         self.log.info("Marché %s : %d contrat(s) proposé(s), %d signé(s) en cours, renouvellement %s",
                       name, len(data.get("jobs") or []), taken, local_time(data.get("nextJobsResetAt")))
         if data.get("jobs") or data.get("recentJobs"):
-            market.locator(comp("JobCard")).first.wait_for(timeout=10000)
+            try:
+                market.locator(comp("JobCard")).first.wait_for(timeout=10000)
+            except PWTimeout:                   # 22/10 : liste reçue mais cartes pas affichées (autre onglet)
+                self.log.debug("Cartes de contrats absentes : je recharge l'onglet Contrats")
+                data = self.fetch_jobs(market) or data
+                market.locator(comp("JobCard")).first.wait_for(timeout=10000)
         return data
 
     def visit_market(self, name: str, notes: list[str], failed: list[str]) -> dict | None:
@@ -1497,6 +1512,10 @@ class Bot:
         if srv.get("accessType") in ("regular", "admin"):
             return None
         if jcfg.get("sign_without_access", False):
+            best = float((self.state.data.get("hack_power") if self.state is not None else None) or 0)
+            defence = srv.get("serverDefenceRate")
+            if best and defence is not None and float(defence) > best:
+                return f"défense de {server} ({defence}) plus forte que ton meilleur outil de piratage ({best:g})"
             return None
         return (f"il faudrait pirater {server} (aucun accès, défense {srv.get('serverDefenceRate', '?')}) : "
                 "refusé tant que sign_without_access = false")
@@ -1683,6 +1702,16 @@ class Bot:
                 return
             raise Hopeless("pas de bouton Déchiffrer avec ce préréglage : module trop faible pour ce fichier "
                            f"(niveau {details.get('encryptionLevel')}), job perdu")
+        text = analysis.inner_text()
+        level = re.search(r"(?:NIVEAU DE CHIFFREMENT|ENCRYPTION LEVEL)\s*([\d.]+)", text, re.I)
+        power = re.search(r"(?:PUISSANCE DE D[ÉE]CHIFFREMENT|DECRYPTION POWER)\s*([\d.]+)", text, re.I)
+        if level and power:
+            self.log.info("%s : niveau de chiffrement %s, puissance de déchiffrement %s (préréglage « %s »)",
+                          target.get("name"), level.group(1), power.group(1), self._current_preset)
+        if decrypt.first.is_disabled() or (level and power and float(level.group(1)) > float(power.group(1))):
+            # 22/10 : niveau 25 contre puissance 21, bouton Déchiffrer grisé
+            raise Hopeless(f"{target.get('name')} : niveau de chiffrement {level.group(1) if level else '?'} > "
+                           f"puissance de déchiffrement {power.group(1) if power else '?'} : job perdu")
         if not self.allowed(f"lancer le déchiffrement de {target.get('name')}"):
             return
         mark = self.events.mark()
@@ -1870,6 +1899,16 @@ class Bot:
             raise StepFailed(f"{server} : ni accès par tâche ni outil de piratage")
         tools = [t for t in status.get("hackTools") or [] if isinstance(t, dict) and t.get("moduleName")]
         tool = max(tools, key=lambda t: float(t.get("hackPower") or 0)) if tools else None
+        if tool and self.state is not None:
+            self.state.note_hack_power(tool.get("hackPower"))
+        try:
+            too_weak = float(tool.get("hackPower") or 0) < float(defence) if tool and defence is not None else False
+        except (TypeError, ValueError):
+            too_weak = False
+        if too_weak and srv.get("accessType") not in ("regular", "admin"):
+            # 22/10 : puissance 19 contre défense 24, le jeu ne lance rien (ni piratage, ni ICE WALL)
+            raise Hopeless(f"{server} : outil le plus puissant {tool['moduleName']} ({tool.get('hackPower')}) "
+                           f"plus faible que la défense ({defence}) : piratage impossible, job perdu")
         target = box.get_by_text(tool["moduleName"], exact=True).first if tool else None
         if target is None or not target.count():
             raise StepFailed(f"{server} : outil de piratage introuvable dans la fenêtre ({tools})")

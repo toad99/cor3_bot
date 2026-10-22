@@ -305,6 +305,16 @@ v1.25.71 ✅ (relevé `ws_dump` du 21/10 à 23:44) :
   - Bilan au 22/10 05:05 : les 9 types de jobs ont été réussis par le bot en v1.25.71 (Log/Data Download, File
     Decryption Home et distants jusqu'à [18, 25], Decrypt & Extract, Data Upload, Log Deletion, File Elimination,
     IP Cleanup, IP Injection). Seul échec définitif : `.xvct [22, 27]`, trop fort pour « big decrypt ».
+  - Déchiffrement (22/10, 12:45) ✅ : `FileAnalysisProtocolApplication` affiche « NIVEAU DE CHIFFREMENT 25.0 » et
+    « PUISSANCE DE DÉCHIFFREMENT 21.0 » (en rouge si plus faible) ; le bouton Déchiffrer est alors **présent mais
+    grisé** (un clic attend 20 s pour rien). Puissance du préréglage « decrypt » : 21. Le bot lit les deux
+    nombres, les écrit au journal, et classe le job perdu si le niveau dépasse la puissance.
+  - Piratage impossible (22/10, 22:47) ✅ : SRM7-M, défense 24, meilleur outil « hack soyuz » A/Bver 410 puissance
+    19 : le clic sur l'outil ne lance rien. Le bot mémorise la puissance maximale vue (`hack_power` dans
+    `state.json`) et refuse d'avance un contrat Acquisition sur un serveur sans accès plus défendu ; si ça arrive
+    quand même, job perdu tout de suite.
+  - Bilan du 22/10 (journal) : 62 jobs terminés, 75 598 CR, 10 385 REP ; 3 déchiffrements perdus (fichiers trop
+    chiffrés) et 1 piratage impossible (expire le 23/10), tous à amende de réputation, aucun dépôt perdu.
   - Decrypt & Extract : après l'ICE WALL réussi, `desktop:update.file` arrive avec l'id du fichier téléchargé,
     pas l'id « j_… » du job : le bot accepte alors n'importe quel `update.file`.
   - Le raccourci Downloads du bureau peut être caché par une fenêtre : double-clic DOM en secours.

@@ -129,3 +129,17 @@ def test_hopeless_decrypt_is_lost_not_retried_and_keeps_the_fuse(tmp_path):
         bot.run_jobs()
     assert signed == ["data-ok", "log-ok", "decrypt-1", "decrypt-2", "log-hack"]   # le fusible ne saute pas
     assert "decrypt-1" not in state.pending_jobs() and state.job_lost("decrypt-1")
+
+
+def test_over_defended_server_is_refused_before_signing(tmp_path):
+    """22/10 : SRM7-M défense 24, meilleur outil 19 : le contrat ne doit pas être signé."""
+    bot, state, _ = make_bot(tmp_path)
+    acquisition = job("log-srm7", "DownloadLog", 2011, server="RM7-B")
+    bot.events.servers["b"]["serverDefenceRate"] = 24
+    assert bot.access_problem(acquisition) is None                   # puissance encore inconnue : on tente
+    state.note_hack_power(19)
+    assert "plus forte que ton meilleur outil" in bot.access_problem(acquisition)
+    state.note_hack_power(17)                                        # on garde le maximum
+    assert state.data["hack_power"] == 19
+    bot.events.servers["b"]["serverDefenceRate"] = 15
+    assert bot.access_problem(acquisition) is None
