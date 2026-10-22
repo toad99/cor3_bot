@@ -257,6 +257,14 @@ v1.25.71 ✅ (relevé `ws_dump` du 21/10 à 23:44) :
 - Journaux ✅ : `sai:get.logs` → `logs[]` avec `seq`, `message`, `sizeMb`, `source` (`job` pour la cible).
   **L'ordre des lignes du DOM est celui du WebSocket** : la cible (`logSeqs`) se retrouve sans ambiguïté même si
   plusieurs logs ont le même nom (le guide conseille sinon « la plus petite taille »). Icônes `DownloadIcon` / `TrashIcon`.
+- v1.25.71 ✅ (capture du 22/10 à 02:36, RM7-S4L3) : `SaiLogs` est un tableau Nom / .type / .taille / Action ;
+  chaque ligne de la `ScrollArea` a quatre cellules : `LogIcon` + message, « -- », taille (« 2.21Mb »), puis les
+  boutons `DownloadIcon` et `TrashIcon` **dans leur propre cellule**. 19 lignes, la cible `seq` 21 en 5e position
+  comme dans `get.logs` ; plusieurs messages en double (« Certificate renewal scheduled » × 4). Le bot vérifie le
+  texte de la ligne entière (plus grand bloc qui ne contient que ce bouton) : l'ancien sélecteur ne lisait que la
+  cellule Action, vide, et refusait de cliquer. Nouveau panneau à droite, `SaiSearchTools` : « Rechercher des
+  outils (0) », « Faire correspondre à la liste », « Rechercher des objets de valeur », fonctions de
+  correspondance et de recherche « Indisponible » (sans doute un module à équiper) ❓.
 - Suppression ❓ : fenêtre `[data-component-name="SaiDeleteModal"]`, boutons `SaiDeleteButtons` (dernier = confirmer).
   Réponse du serveur ✅ (Log Deletion faite à la main le 21/10) : `sai:log.delete {deletedSeq, sizeMb}`.
 - Ajout d'IP ❓ : `[data-sentry-component="SaiAddButton"]` → `SaiAddIpModal` (`SaiAddIpModalIpInput`,

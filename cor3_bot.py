@@ -1782,7 +1782,10 @@ class Bot:
         icon = "TrashIcon" if delete else "DownloadIcon"
         buttons = panel.locator("button").filter(has=self.page.locator(comp(icon)))
         buttons.nth(index).wait_for(timeout=10000)
-        row = buttons.nth(index).locator("xpath=ancestor::div[.//*[@data-sentry-component='TrashIcon']][1]")
+        # la ligne = le plus grand bloc qui ne contient que ce bouton (v1.25.71 : les boutons sont dans une
+        # cellule « Action » à part, sans le nom)
+        row = buttons.nth(index).locator(
+            f"xpath=ancestor::div[count(.//*[@data-sentry-component='{icon}'])=1][last()]")
         label = items[index].get("message") or items[index].get("name") or ""
         if label and label[:25] not in row.inner_text():
             raise StepFailed(f"la ligne {index} ne correspond pas à « {label} » : rien n'est fait")

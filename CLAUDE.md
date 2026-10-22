@@ -81,4 +81,4 @@ python cor3_bot.py --auto                 # ce que fait la tâche horaire
   `expeditions:get.active`. Les deux sont gérés. Voir `docs/INSPECTION.md` (§ 3, 4, 11).
 - 22/10 à 02:15 (premier vrai passage en v1.25.71) : Signal Decode réussi. Recliquer l'onglet Contrats déjà ouvert
   ne recharge plus la liste ; après une signature, le jeu la recharge de lui-même (§ 6). Corrigé après un Log
-  Download signé puis abandonné.
+  Download signé puis abandonné. Les journaux SAI sont devenus un tableau, boutons dans une cellule à part (§ 8).
