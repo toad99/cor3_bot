@@ -451,9 +451,12 @@ function openSaiApp() {
   document.querySelectorAll('[data-sentry-component=SaiLogin]').forEach(x => x.closest('[data-sentry-component=AppWindow]').remove());
   window.__mock.sai++;
   openWindow('SAI_APP', 'SAI', el(`<div data-sentry-component="ServerAdministrationInterfaceApplication">
-    <div data-sentry-component="SaiHeader"><button>RÉSUMÉ</button><button onclick="showLogs()">JOURNAUX</button></div>
+    <div data-sentry-component="SaiHeader"><button>RÉSUMÉ</button><button onclick="logsTab()">JOURNAUX</button></div>
     <div class="sai-body"></div></div>`));
 }
+// &lazytab=1 : le premier clic sur un onglet du terminal n'envoie rien (clic trop tôt après la connexion)
+let lazyTab = params.get('lazytab') === '1';
+function logsTab() { if (lazyTab) { lazyTab = false; return; } showLogs(); }
 function showLogs() {   // v1.25.71 : tableau Nom / .type / .taille / Action, les boutons dans leur propre cellule
   document.querySelector('.sai-body').innerHTML = `<div data-sentry-component="SaiLogs">
     <div><span>Nom</span><span>.type</span><span>.taille</span><span>Action</span></div>

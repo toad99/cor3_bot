@@ -1927,9 +1927,7 @@ class Bot:
         if not server:
             raise StepFailed("job serveur sans serveur")
         sai = self.open_sai(server)
-        mark = self.events.mark()
-        sai.locator(comp("SaiHeader")).get_by_role("button", name=rx(TXT[tab])).click()
-        ev = self.wait_event("sai", room_action, mark, timeout=15)
+        ev = self.sai_tab(sai, tab, room_action)
         items = (ev.data or {}).get(list_key) or []
         index = self._find_target(items, details, list_key)
         panel = sai.locator(comp("SaiLogs" if list_key == "logs" else "SaiFiles"))
@@ -2003,6 +2001,26 @@ class Bot:
                 return candidates[0]
         raise StepFailed(f"cible introuvable ou ambiguë dans {list_key} : {details}")
 
+    SAI_TAB_IDS = {"tab_transit": "SaiTabs-TRANSIT", "tab_files": "SaiTabs-FILES", "tab_logs": "SaiTabs-LOGS"}
+
+    def sai_tab(self, sai: Locator, tab: str, room_action: str) -> WsEvent:
+        """Onglet du terminal SAI et sa liste (sai:get.transit / get.files / get.logs). Un clic trop tôt après
+        la connexion, ou sur l'onglet déjà ouvert, n'envoie rien (22/10) : on passe par « Résumé » et on revient."""
+        header = sai.locator(comp("SaiHeader"))
+        by_id = header.locator(f'[data-onboarding-300-id="{self.SAI_TAB_IDS[tab]}"]')
+        button = by_id.first if by_id.count() else header.get_by_role("button", name=rx(TXT[tab])).first
+        mark = self.events.mark()
+        button.click()
+        try:
+            return self.wait_event("sai", room_action, mark, timeout=5)
+        except StepFailed:
+            self.log.debug("Onglet %s sans réponse : passage par « Résumé » et retour", tab)
+        mark = self.events.mark()
+        header.get_by_role("button", name=rx(r"^\s*(Résumé|Summary)\s*$")).first.click()
+        self.pause(800)
+        button.click()
+        return self.wait_event("sai", room_action, mark, timeout=15)
+
     def do_upload_job(self, job: dict, details: dict) -> None:
         """« Data Upload » (d'après le joueur, jamais vu par le bot) : terminal SAI → FICHIERS → icône
         d'envoi, puis naviguer dans Downloads et cliquer le fichier cible."""
@@ -2012,9 +2030,7 @@ class Bot:
         if not server or not names:
             raise StepFailed(f"job d'envoi incomplet : {details}")
         sai = self.open_sai(server)
-        mark = self.events.mark()
-        sai.locator(comp("SaiHeader")).get_by_role("button", name=rx(TXT["tab_files"])).click()
-        self.wait_event("sai", "get.files", mark, timeout=15)
+        self.sai_tab(sai, "tab_files", "get.files")
         upload = sai.locator("button").filter(
             has=self.page.locator('[data-sentry-element="UploadIcon"], [data-sentry-component="UploadIcon"]'))
         if not upload.count():
@@ -2061,8 +2077,7 @@ class Bot:
             raise StepFailed(f"job transit incomplet : {details}")
         sai = self.open_sai(server)
         mark = self.events.mark()
-        sai.locator(comp("SaiHeader")).get_by_role("button", name=rx(TXT["tab_transit"])).click()
-        self.wait_event("sai", "get.transit", mark, timeout=15)
+        self.sai_tab(sai, "tab_transit", "get.transit")
         for ip in ips:
             if add:
                 if not self.allowed(f"ajouter l'IP {ip} sur {server}"):

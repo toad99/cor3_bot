@@ -399,6 +399,14 @@ def test_game_reopened_on_the_loadout_screen(make_bot):
     assert bot.page.evaluate("localStorage.getItem('loadout-powered')") == "true"
 
 
+def test_sai_tab_click_without_answer_is_retried(make_bot, tmp_path):
+    """Le premier clic sur JOURNAUX n'envoie rien (22/10, IP Cleanup) : le bot passe par Résumé et revient."""
+    bot = make_bot(extra="&jobs=1&lazytab=1", state=cor3_bot.State(tmp_path / "state.json"))
+    summary = bot.run_jobs()
+    assert summary.startswith("1 job(s) terminé(s) : Log Download (D4RK RM7MI)"), summary
+    assert mock(bot)["downloads"] == [24]
+
+
 def test_signed_job_is_finished_and_forgotten(make_bot, tmp_path):
     state = cor3_bot.State(tmp_path / "state.json")
     state.set_job_pending("job-1", "D4RK RM7MI", "Log Download", "RM7-E1L5 en maintenance")

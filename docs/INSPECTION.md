@@ -300,6 +300,11 @@ v1.25.71 ✅ (relevé `ws_dump` du 21/10 à 23:44) :
     dans `FilePickerFileName`, bouton « Envoyer » `FilePickerAttachButton`, croix `FilePickerCloseButton`.
     **Sans le clic sur Envoyer, la fenêtre reste ouverte devant tout** (tous les clics suivants échouent) :
     le bot la referme toujours. Trame de réponse à l'envoi pas encore relevée ❓.
+  - 22/10 à 05:00 : un clic sur « Accès de transit » juste après la connexion n'a envoyé aucun `get.transit`.
+    `Bot.sai_tab` clique l'onglet par son id (`SaiTabs-*`), attend 5 s, sinon passe par « Résumé » et revient.
+  - Bilan au 22/10 05:05 : les 9 types de jobs ont été réussis par le bot en v1.25.71 (Log/Data Download, File
+    Decryption Home et distants jusqu'à [18, 25], Decrypt & Extract, Data Upload, Log Deletion, File Elimination,
+    IP Cleanup, IP Injection). Seul échec définitif : `.xvct [22, 27]`, trop fort pour « big decrypt ».
   - Decrypt & Extract : après l'ICE WALL réussi, `desktop:update.file` arrive avec l'id du fichier téléchargé,
     pas l'id « j_… » du job : le bot accepte alors n'importe quel `update.file`.
   - Le raccourci Downloads du bureau peut être caché par une fenêtre : double-clic DOM en secours.
