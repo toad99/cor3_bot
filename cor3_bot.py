@@ -1097,6 +1097,8 @@ class Bot:
         market.wait_for(timeout=15000)
         try:
             opts = self.wait_event("market", "get.options", mark, timeout=15).data
+            if isinstance(opts, dict) and opts.get("userCredits") is not None:
+                self.log.info("Solde : %s CR", opts["userCredits"])           # lu par --bilan
             expected = (self.events.server(name) or {}).get("marketId")
             if isinstance(opts, dict) and expected and opts.get("marketId") not in (None, expected):
                 raise StepFailed(f"le marché ouvert n'est pas celui de {name}")
@@ -2390,6 +2392,58 @@ def warn_daily_if_late(cfg: dict, state: State, notifier: Notifier, why: str, no
                   f"Reset dans {left_h:.1f} h ({local_time(reset)}). Le bot ne l'a pas lancée : {why}.", failure=True)
 
 
+JOB_DONE = re.compile(r"^(\d{4}-\d\d-\d\d) \S+ +INFO +Job terminé : (.+?) sur .+? \(\+(\d+) CR, \+(\d+) REP\)")
+JOB_LOST = re.compile(r"^(\d{4}-\d\d-\d\d) .*job perdu")
+BALANCE = re.compile(r"^(\d{4}-\d\d-\d\d \S+) +INFO +Solde : (\d+) CR")
+
+
+def bilan(log_dir: Path, today: dt.date | None = None, days: int = 7) -> str:
+    """Gains par jour (heure locale), lus dans les journaux : jobs terminés, CR, REP, jobs perdus, dernier solde."""
+    today = today or dt.date.today()
+    per_day: dict[str, dict] = {}
+    types: dict[str, int] = {}
+    balance = None
+    for path in sorted(log_dir.glob("cor3_*.log")):
+        lost_seen: set[str] = set()
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if m := JOB_DONE.match(line):
+                day = per_day.setdefault(m.group(1), {"jobs": 0, "cr": 0, "rep": 0, "lost": 0})
+                day["jobs"] += 1
+                day["cr"] += int(m.group(3))
+                day["rep"] += int(m.group(4))
+                if m.group(1) >= (today - dt.timedelta(days=days - 1)).isoformat():
+                    types[m.group(2)] = types.get(m.group(2), 0) + 1
+            elif (m := JOB_LOST.match(line)) and "WARNING" in line:
+                key = line.split("en échec")[0][20:]            # un même job revient dans le résumé : une fois
+                if key not in lost_seen:
+                    lost_seen.add(key)
+                    per_day.setdefault(m.group(1), {"jobs": 0, "cr": 0, "rep": 0, "lost": 0})["lost"] += 1
+            elif m := BALANCE.match(line):
+                balance = (m.group(1), int(m.group(2)))
+    def num(n: int, width: int) -> str:
+        return f"{n:,}".replace(",", " ").rjust(width)
+
+    def row(label: str, day: dict) -> str:
+        lost = f"  ({day['lost']} perdu(s))" if day["lost"] else ""
+        return f"  {label:<12} {day['jobs']:>3} jobs  {num(day['cr'], 8)} CR  {num(day['rep'], 7)} REP{lost}"
+
+    out = ["Bilan des jobs (d'après logs/cor3_*.log)", ""]
+    week = {"jobs": 0, "cr": 0, "rep": 0, "lost": 0}
+    for i in range(days):
+        d = (today - dt.timedelta(days=i)).isoformat()
+        day = per_day.get(d, {"jobs": 0, "cr": 0, "rep": 0, "lost": 0})
+        for k in week:
+            week[k] += day[k]
+        out.append(row("aujourd'hui" if i == 0 else "hier" if i == 1 else d, day))
+    out.append(row(f"{days} jours", week))
+    if types:
+        out += ["", f"  Par type ({days} jours) : "
+                + ", ".join(f"{k} {v}" for k, v in sorted(types.items(), key=lambda kv: -kv[1]))]
+    out += ["", f"  Dernier solde vu : {num(balance[1], 0)} CR le {balance[0]}" if balance
+            else "  Dernier solde vu : pas encore relevé (au prochain passage)"]
+    return "\n".join(out)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Automatisation quotidienne de cor3.gg")
     ap.add_argument("--config", default=str(ROOT / "config.toml"))
@@ -2400,6 +2454,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="passage horaire : ne lance le navigateur que si quelque chose est dû")
     ap.add_argument("--headless", action="store_true", help="navigateur invisible")
     ap.add_argument("--test-notify", action="store_true", help="tester les alertes")
+    ap.add_argument("--bilan", action="store_true", help="gains par jour (CR, REP), sans ouvrir Chrome")
     ap.add_argument("--url", default=None, help=argparse.SUPPRESS)      # maquette de test
     args = ap.parse_args(argv)
     if args.url:
@@ -2412,6 +2467,9 @@ def main(argv: list[str] | None = None) -> int:
     if not log_dir.is_absolute():
         log_dir = ROOT / log_dir
     gen["log_dir"] = str(log_dir)
+    if args.bilan:
+        print(bilan(log_dir))
+        return 0
     log = setup_logging(log_dir)
     notifier = Notifier(cfg["notify"], log)
     if args.test_notify:

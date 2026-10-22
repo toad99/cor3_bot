@@ -191,3 +191,19 @@ def test_server_in_maintenance_from_map_events():
         {"id": "a", "isInMaintenance": True, "maintenanceEndsAt": "2026-10-21T10:00:00.000Z"}]}})
     assert "maintenance" in bot.job_refusal_reason(job)
     assert bot.events.endpoint() == "SRM7-M"
+
+
+def test_bilan_reads_the_daily_logs(tmp_path):
+    (tmp_path / "cor3_2026-10-22.log").write_text("\n".join([
+        "2026-10-22 03:25:21 INFO    Job terminé : Log Download sur Home Server (+1445 CR, +261 REP)",
+        "2026-10-22 04:12:22 INFO    Job terminé : File Decryption sur Home Server (+838 CR, +151 REP)",
+        "2026-10-22 04:19:20 WARNING Job File Decryption (SRM7-M) en échec : pas de bouton Déchiffrer : job perdu",
+        "2026-10-22 04:20:43 ERROR   [jobs] ÉCHEC : ... File Decryption (SRM7-M) : job perdu",
+        "2026-10-22 05:00:00 INFO    Solde : 39540 CR"]), encoding="utf-8")
+    (tmp_path / "cor3_2026-10-23.log").write_text(
+        "2026-10-23 02:16:00 INFO    Job terminé : IP Cleanup sur Home Server (+1274 CR, +230 REP)\n", encoding="utf-8")
+    text = cor3_bot.bilan(tmp_path, today=dt.date(2026, 10, 23))
+    assert "aujourd'hui    1 jobs     1 274 CR      230 REP" in text
+    assert "hier           2 jobs     2 283 CR      412 REP  (1 perdu(s))" in text
+    assert "7 jours        3 jobs     3 557 CR      642 REP  (1 perdu(s))" in text
+    assert "Dernier solde vu : 39 540 CR le 2026-10-22 05:00:00" in text

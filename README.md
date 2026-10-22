@@ -115,6 +115,8 @@ d'été (2 h 15 n'existe pas), la tâche part à 3 h grâce à « dès que possi
 ## Alertes et journal
 
 - Journal du jour : `logs\cor3_AAAA-MM-JJ.log` ; historique d'une ligne par exécution : `logs\history.jsonl`.
+- **Gains par jour** : `python cor3_bot.py --bilan` (sans ouvrir Chrome) affiche les jobs terminés, CR et REP
+  d'aujourd'hui, d'hier et des 7 derniers jours, les jobs perdus, la répartition par type et le dernier solde vu.
 - État entre deux passages : `state.json` (daily faite, échéance de chaque marché, jobs signés à reprendre,
   expédition en cours).
   Le supprimer ne casse rien : le prochain passage revisite tout.
