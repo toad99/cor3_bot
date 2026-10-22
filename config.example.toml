@@ -25,10 +25,14 @@ names = ["Home Server", "D4RK RM7MI", "SRM7-M", "URM7-M"]
 [jobs]
 enabled = true
 markets = []              # marchés où signer de nouveaux jobs ; [] = tous ceux de [markets]
-# Types gérés sans risque de suppression : DecryptFile, DownloadLog, DownloadFile
+# Types gérés sans risque de suppression : DecryptFile, DownloadLog, DownloadFile ; ajoute
+# "DecryptDownloadedFile" (Decrypt & Extract) et "UploadFile" (Data Upload), codés mais jamais vus en direct.
 types = ["DecryptFile", "DownloadLog", "DownloadFile"]
 allow_deletions = false   # IP Cleanup, Log Deletion, File Elimination (suppression sur le serveur)
 allow_ip_add = false      # IP Injection (ajout d'IP) — écran non vérifié en direct
+# Ordre sur chaque marché : jobs sans mini-jeu, puis déchiffrements, puis piratages. Fusible : un type
+# qui échoue après signature n'est plus signé pendant ce passage ; ICE WALL bloqué = plus de déchiffrement
+# ni de piratage. Ce qui reste faisable est repris au passage horaire suivant.
 max_jobs_per_run = 3
 max_deposit_cr = 0        # 0 = ne signe jamais un job qui demande un dépôt
 max_rep_penalty = 100     # ignore les jobs dont la pénalité REP dépasse ce seuil

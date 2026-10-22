@@ -195,8 +195,11 @@ v1.25.71 ✅ (relevé `ws_dump` du 21/10 à 23:44) :
   `status: "TAKEN"`, `canComplete`). `recentJobs` contient aussi les jobs finis/échoués (`status` ≠ TAKEN).
 - Types : `DecryptFile` (File Decryption), `DownloadLog` (Log Download), `DownloadFile` (File Download),
   `DeleteLog` (Log Deletion), `DeleteFile` (File Elimination), `DeleteIps` (IP Cleanup), `AddIps` (IP Injection).
-- Nouveaux types vus dans `get.jobs` en v1.25.71, jamais ouverts ❓ : `DecryptDownloadedFile` (« Data Download »,
-  « Decrypt & Extract ») et `UploadFile` (« Data Upload »). Le bot les ignore (« type … non géré »). Le nom ne
+- Nouveaux types vus dans `get.jobs` en v1.25.71 : `DecryptDownloadedFile` (« Data Download »,
+  « Decrypt & Extract ») et `UploadFile` (« Data Upload »). D'après le joueur (22/10) : Decrypt & Extract =
+  télécharger le fichier sur le nœud (FICHIERS), puis le déchiffrer dans Downloads ; Data Upload = FICHIERS →
+  icône d'envoi → naviguer dans Downloads → cliquer le fichier cible. Codés ainsi (`do_upload_job` cherche
+  `UploadIcon`), jamais vus par le bot ❓ : les détails du job signé et la fenêtre d'envoi restent à relever. Le nom ne
   suffit pas à reconnaître un job : « Data Download » existe aussi avec un type géré (URM7-M), seul `jobType` compte.
 - v1.25.71 ✅ (relevé `ws_dump` du 21/10) : `conditions = {hasDeposit, hasRepFine, serverConfigId, items[]}`,
   chaque élément `{type, label, isPrimary, subsystem, details}`. La tâche principale a `isPrimary: true` et
@@ -215,6 +218,12 @@ v1.25.71 ✅ (relevé `ws_dump` du 21/10 à 23:44) :
   `details.files[{id, name, isDecrypted}]`. D'après le joueur, hors de Home Server c'est un pari (une fois sur deux,
   le fichier tiré demande un meilleur module), et ce matériel n'est pas rentable à son stade. Le bot ne s'en sert
   pas encore : il faudrait connaître le niveau maximal du module du joueur.
+- Gains relevés le 21/10 (CR, REP, dépôt ou amende) : Log Download 856–1 445 ; Data Download 1 445 (dépôt 506) ;
+  File Decryption 838 (dépôt 126), 1 260 et 1 740 (amendes 137 et 231 REP) ; Decrypt & Extract 1 442 (amende
+  157) ; File Elimination 721–1 460 (dépôts 109–219) ; Log Deletion 1 221–1 274 (dépôts 184–446) ; IP
+  Injection 1 274–1 708. Conditions : toujours l'accès (Grant ou Acquisition) + la tâche principale. Un job à
+  dépôt est rentable dès une réussite sur quatre ; un job à amende ne coûte aucun CR s'il échoue. Le 21/10,
+  13 des 14 serveurs des jobs étaient déjà piratés (`regular`).
 - `recentJobs` contient aussi les jobs `FAILED` ; `market:job.dismiss` `{status}` les retire. Après `job.complete`,
   le serveur pousse `market:job.completed {jobId, marketId, name, rewardCredits, rewardReputation, faction}`.
 - Signer : `JobCard` → « LIRE PLUS » → « Signer » → panneau `[data-component-name="JobSideout"]` → « Signer »

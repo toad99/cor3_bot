@@ -37,6 +37,12 @@ Avant de signer un job, le bot vérifie sur la carte que son serveur y figure, n
 qu'on peut s'y rendre (« Connecter »), puis qu'il pourra s'y connecter : contrat « Access Grant » (l'accès
 vient avec le job) ou accès déjà acquis. Un contrat « Access Acquisition » sur un serveur jamais piraté est
 refusé, sauf si tu mets `sign_without_access = true` (il faudra alors le pirater, ICE WALL compris).
+Pour prendre tout ce qui rapporte : `max_deposit_cr = 600`, `max_rep_penalty = 300`, `max_jobs_per_run = 20`,
+les suppressions et l'IP Injection autorisées. Sur chaque marché, le bot fait d'abord les jobs sans mini-jeu,
+puis les déchiffrements, puis ceux qui demandent un piratage. **Fusible** : un type de job qui échoue après
+signature n'est plus signé pendant ce passage (au pire un dépôt par type en jeu si une mise à jour du jeu casse
+un enchaînement) ; un ICE WALL bloqué (20 min, ou limite quotidienne) arrête déchiffrements et piratages.
+Ce qui reste faisable est repris au passage horaire suivant, avant le renouvellement de la liste.
 Un job déjà signé qu'on ne peut pas finir tout de suite (maintenance, échec) est noté dans `state.json` : la
 tâche horaire revient sur son marché à la fin de la maintenance, ou au passage suivant après un échec, sans
 attendre le minuteur. Après une maintenance, l'accès piraté est perdu : le bot

@@ -56,6 +56,7 @@ ACTIVE_EXPEDITION = {"PREPARING", "RUNNING", "EVENT", "RETURNING"}
 # Job signé en échec : repris au passage horaire suivant (hh:45). 15 min suffit pour qu'un échec du
 # passage de 02:15 soit repris à 02:45 (avec 30 min, un échec à 02:15:34 attendait 03:45).
 JOB_RETRY = dt.timedelta(minutes=15)
+ICE_JOB_TYPES = {"DecryptFile", "DecryptDownloadedFile"}     # passent par le mini-jeu ICE WALL
 
 # ---------------------------------------------------------------------------
 # Sélecteurs. On s'appuie sur des attributs posés par le build du jeu :
@@ -137,6 +138,15 @@ class Unavailable(StepFailed):
         self.retry_at = retry_at
 
 
+class IceWallLocked(StepFailed):
+    """ICE WALL verrouillé (20 min après un échec) ou limite quotidienne atteinte : plus de déchiffrement
+    ni de piratage par mini-jeu pendant ce passage ; retry_at = fin du verrou."""
+
+    def __init__(self, message: str, retry_at: dt.datetime | None = None):
+        super().__init__(message)
+        self.retry_at = retry_at
+
+
 class Simulated(StepFailed):
     """Mode --dry-run : la suite dépend d'une action qu'on n'a pas faite (ex. piratage)."""
 
@@ -181,6 +191,15 @@ def local_time(value: Any) -> str:
     """Heure locale lisible (journal, alertes)."""
     when = parse_time(value)
     return when.astimezone().strftime("%d/%m %H:%M") if when else "?"
+
+
+def xpath_literal(text: str) -> str:
+    """Chaîne XPath 1.0 sûre (guillemets simples et doubles)."""
+    if "'" not in text:
+        return f"'{text}'"
+    if '"' not in text:
+        return f'"{text}"'
+    return "concat(" + ", \"'\", ".join(f"'{part}'" for part in text.split("'")) + ")"
 
 
 def utc_now() -> dt.datetime:
@@ -244,6 +263,16 @@ class State:
             return now >= reset
         checked = parse_time(entry.get("checked"))
         return checked is None or now - checked >= dt.timedelta(hours=6)
+
+    def set_market_revisit(self, name: str, when: dt.datetime) -> None:
+        """Jobs faisables laissés sur ce marché (fusible, ICE WALL bloqué, budget) : y repasser à `when`,
+        sans attendre le minuteur. Inutile si le minuteur tombe avant : la liste sera remplacée."""
+        entry = self.data["markets"].setdefault(name, {})
+        reset = parse_time(entry.get("next_reset"))
+        if reset and reset <= when:
+            return
+        entry["retry_at"] = when.isoformat(timespec="seconds")
+        entry.pop("problem", None)
 
     def next_market_time(self, name: str) -> dt.datetime | None:
         entry = self.data["markets"].get(name) or {}
@@ -1245,6 +1274,8 @@ class Bot:
         self.ensure_connected()
         self.close_all_windows()
         done: list[str] = []
+        blown: set[str] = set()     # fusible : types qui ont échoué après signature pendant ce passage
+        ice: IceWallLocked | None = None    # ICE WALL bloqué : plus de déchiffrement ni de piratage
         failed: list[str] = []      # échecs : déclenchent une alerte
         notes: list[str] = []       # laissé de côté volontairement ou indisponible pour l'instant
         seen: list[str] = []
@@ -1277,17 +1308,27 @@ class Bot:
                     except (StepFailed, PWTimeout) as exc:      # maintenance : on réessaiera plus tard
                         self._job_error(exc, f"{job['name']} ({name}, signé)", job, notes, failed, soft=True,
                                         market=name)
+                        if isinstance(exc, IceWallLocked):
+                            ice = exc
                 # b) nouveaux jobs selon la politique
                 if name not in take_on:
                     continue
-                for job in sorted(data.get("jobs") or [], key=lambda j: -int(j.get("rewardCredits", 0) or 0)):
-                    if budget <= 0:
-                        break
+                left: list[dict] = []       # faisables mais remis à plus tard : on repassera sur ce marché
+                for job in sorted(data.get("jobs") or [],
+                                  key=lambda j: (self.job_risk(j), -int(j.get("rewardCredits", 0) or 0))):
                     if job.get("id") in handled:
                         continue
                     reason = self.job_refusal_reason(job)
                     if reason:
                         self.log.debug("Job ignoré %s (%s, %s) : %s", job["name"], name, self.job_server(job), reason)
+                        continue
+                    hold = ("nombre de jobs du passage atteint (max_jobs_per_run)" if budget <= 0
+                            else f"un job {job.get('jobType')} a échoué pendant ce passage" if job.get("jobType") in blown
+                            else f"{ice}" if ice and self.job_risk(job) > 0 else None)
+                    if hold:
+                        self.log.info("Job remis à plus tard : %s (%s, %s) : %s", job["name"], name,
+                                      self.job_server(job) or "-", hold)
+                        left.append(job)
                         continue
                     handled.add(job.get("id"))
                     signed, current = False, job
@@ -1305,6 +1346,16 @@ class Bot:
                     except (StepFailed, PWTimeout) as exc:
                         self._job_error(exc, f"{job['name']} ({name})", current, notes, failed, soft=False,
                                         market=name if signed else None)
+                        if isinstance(exc, IceWallLocked):
+                            ice = exc
+                        elif signed and not isinstance(exc, Unavailable):
+                            blown.add(job.get("jobType"))
+                if left and self.state is not None and not self.dry_run:
+                    when = utc_now() + JOB_RETRY
+                    if ice and ice.retry_at and all(self.job_risk(j) > 0 for j in left):
+                        when = max(when, ice.retry_at)
+                    self.state.set_market_revisit(name, when)
+                    notes.append(f"{len(left)} job(s) de {name} remis au passage de {local_time(when)} ou après")
         finally:
             self.cleanup()
         summary = f"{len(done)} job(s) terminé(s)"
@@ -1333,6 +1384,20 @@ class Bot:
         failed.append(f"{label} : {exc}")
         self.log.warning("Job %s en échec : %s", label, exc)
         self.snapshot(f"job_{job.get('jobType')}")
+
+    def needs_hack(self, job: dict) -> bool:
+        """Serveur sans accès (ni « Access Grant », ni accès déjà piraté) : il faudra le pirater."""
+        server = self.job_server(job)
+        if not server or self.job_access(job) == "grant":
+            return False
+        return (self.events.server(server) or {}).get("accessType") not in ("regular", "admin")
+
+    def job_risk(self, job: dict) -> int:
+        """Ordre de passage sur un marché : 0 = sans mini-jeu sur un serveur accessible, 1 = déchiffrement,
+        2 = piratage à faire. Un ICE WALL raté bloque le mini-jeu 20 min : les jobs sûrs passent avant."""
+        if self.needs_hack(job):
+            return 2
+        return 1 if job.get("jobType") in ICE_JOB_TYPES else 0
 
     def job_type_refusal(self, job: dict) -> str | None:
         """Le type de job est-il autorisé par la config ? (vaut aussi pour les jobs déjà signés)"""
@@ -1453,6 +1518,14 @@ class Bot:
         elif jtype in {"DownloadFile", "DeleteFile"}:
             self.do_sai_list_job(job, details, tab="tab_files", room_action="get.files", list_key="files",
                                  delete=(jtype == "DeleteFile"))
+        elif jtype == "DecryptDownloadedFile":
+            # « Decrypt & Extract » (d'après le joueur) : télécharger le fichier sur le nœud, puis le
+            # déchiffrer dans Downloads
+            self.do_sai_list_job(job, details, tab="tab_files", room_action="get.files", list_key="files",
+                                 delete=False)
+            self.do_decrypt_job(details)
+        elif jtype == "UploadFile":
+            self.do_upload_job(job, details)
         elif jtype in {"DeleteIps", "AddIps"}:
             self.do_transit_job(job, details, add=(jtype == "AddIps"))
         else:
@@ -1543,14 +1616,16 @@ class Bot:
         ev = self.wait_event("minigames", "start.minigame", mark, timeout=15)
         info = ev.data or {}
         if not info.get("url") and info.get("lockExpiresAt"):
-            raise StepFailed(f"mini-jeu verrouillé jusqu'à {info['lockExpiresAt']} (échec précédent)")
+            raise IceWallLocked(f"mini-jeu verrouillé jusqu'à {local_time(info['lockExpiresAt'])} (échec précédent)",
+                                parse_time(info["lockExpiresAt"]))
         self.solve_ice_wall()
         deadline = time.time() + 20
         while time.time() < deadline:
             lock = self.events.find(mark, "minigames", "start.minigame",
                                     pred=lambda e: bool((e.data or {}).get("lockExpiresAt")))
             if lock:
-                raise StepFailed(f"ICE WALL perdu, mini-jeu verrouillé jusqu'à {lock[-1].data['lockExpiresAt']}")
+                until = lock[-1].data["lockExpiresAt"]
+                raise IceWallLocked(f"ICE WALL perdu, mini-jeu verrouillé jusqu'à {local_time(until)}", parse_time(until))
             updated = self.events.find(mark, "desktop", "update.file",
                                        pred=lambda e: ((e.data or {}).get("file") or {}).get("id") == target["id"])
             if updated or self.events.find(mark, "market", "job.can-complete"):
@@ -1575,7 +1650,8 @@ class Bot:
             if state is None:
                 return                                   # fenêtre fermée : fin du mini-jeu
             if state.get("limit"):
-                raise StepFailed("ICE WALL : limite quotidienne de parties atteinte")
+                raise IceWallLocked("ICE WALL : limite quotidienne de parties atteinte",
+                                    utc_now().replace(hour=0, minute=5, second=0) + dt.timedelta(days=1))
             done, total = state.get("done"), state.get("total")
             if done is not None and done != last_done:
                 self.log.info("ICE WALL : %s/%s", done, total)
@@ -1741,7 +1817,8 @@ class Bot:
             if game:
                 info = game[-1].data or {}
                 if not info.get("url") and info.get("lockExpiresAt"):
-                    raise StepFailed(f"ICE WALL verrouillé jusqu'à {local_time(info['lockExpiresAt'])} (échec récent)")
+                    raise IceWallLocked(f"ICE WALL verrouillé jusqu'à {local_time(info['lockExpiresAt'])} (échec récent)",
+                                        parse_time(info["lockExpiresAt"]))
                 self.log.info("%s : piratage par ICE WALL (défense %s)", server, defence)
                 self.solve_ice_wall()
                 self.wait_hack_finished(server, mark)
@@ -1763,7 +1840,8 @@ class Bot:
             lock = self.events.find(mark, "minigames", "start.minigame",
                                     pred=lambda e: bool((e.data or {}).get("lockExpiresAt")))
             if lock:
-                raise StepFailed(f"ICE WALL perdu : verrouillé jusqu'à {local_time(lock[-1].data['lockExpiresAt'])}")
+                until = lock[-1].data["lockExpiresAt"]
+                raise IceWallLocked(f"ICE WALL perdu : verrouillé jusqu'à {local_time(until)}", parse_time(until))
             self.pause(300)
         raise StepFailed(f"{server} : pas de confirmation de fin de piratage")
 
@@ -1817,9 +1895,11 @@ class Bot:
     def _find_target(items: list[dict], details: dict, list_key: str) -> int:
         """Index de la cible dans la liste du serveur. Les doublons de noms sont
         départagés par le numéro de séquence fourni par le job, sinon par source == 'job'."""
+        files = [f for f in details.get("files") or [] if isinstance(f, dict)]
         seqs = details.get("logSeqs") or details.get("fileSeqs") or []
-        ids = details.get("fileIds") or details.get("logIds") or []
-        names = details.get("logNames") or details.get("fileNames") or details.get("names") or []
+        ids = details.get("fileIds") or details.get("logIds") or [f.get("id") for f in files if f.get("id")]
+        names = (details.get("logNames") or details.get("fileNames") or details.get("names")
+                 or [f.get("name") for f in files if f.get("name")])
         for i, it in enumerate(items):
             if seqs and it.get("seq") in seqs:
                 return i
@@ -1832,6 +1912,42 @@ class Bot:
         if len(candidates) == 1:
             return candidates[0]
         raise StepFailed(f"cible introuvable ou ambiguë dans {list_key} : {details}")
+
+    def do_upload_job(self, job: dict, details: dict) -> None:
+        """« Data Upload » (d'après le joueur, jamais vu par le bot) : terminal SAI → FICHIERS → icône
+        d'envoi, puis naviguer dans Downloads et cliquer le fichier cible."""
+        server = self.job_server(job)
+        files = [f for f in details.get("files") or [] if isinstance(f, dict)]
+        names = [f.get("name") for f in files if f.get("name")] or details.get("fileNames") or []
+        if not server or not names:
+            raise StepFailed(f"job d'envoi incomplet : {details}")
+        sai = self.open_sai(server)
+        mark = self.events.mark()
+        sai.locator(comp("SaiHeader")).get_by_role("button", name=rx(TXT["tab_files"])).click()
+        self.wait_event("sai", "get.files", mark, timeout=15)
+        upload = sai.locator("button").filter(has=self.page.locator(comp("UploadIcon")))
+        if not upload.count():
+            raise StepFailed("pas d'icône d'envoi (UploadIcon) dans l'onglet FICHIERS")
+        upload.first.click()
+        self.pause(800)
+        not_desktop = "not(ancestor::*[@data-sentry-component='DesktopShortcutComponent'])"
+        downloads = self.page.locator(f"xpath=//*[normalize-space(text())='Downloads' and {not_desktop}]")
+        if downloads.count():
+            downloads.last.click()
+            self.pause(800)
+        target = self.page.locator(f"xpath=//*[contains(normalize-space(text()), {xpath_literal(names[0])}) "
+                                   f"and {not_desktop}]")
+        try:
+            target.last.wait_for(timeout=8000)
+        except PWTimeout:
+            raise StepFailed(f"fichier {names[0]} introuvable dans la fenêtre d'envoi")
+        if not self.allowed(f"envoyer {names[0]} sur {server}"):
+            return
+        mark = self.events.mark()
+        target.last.click()
+        self.wait_event("sai", "file.upload", mark, timeout=20)
+        self._expect_can_complete(mark)
+        self.close_window(comp("ServerAdministrationInterfaceApplication"))
 
     def do_transit_job(self, job: dict, details: dict, add: bool) -> None:
         # Écran non testé en direct (le job IP Injection en cours n'était pas à moi) :

@@ -82,3 +82,8 @@ python cor3_bot.py --auto                 # ce que fait la tâche horaire
 - 22/10 à 02:15 (premier vrai passage en v1.25.71) : Signal Decode réussi. Recliquer l'onglet Contrats déjà ouvert
   ne recharge plus la liste ; après une signature, le jeu la recharge de lui-même (§ 6). Corrigé après un Log
   Download signé puis abandonné. Les journaux SAI sont devenus un tableau, boutons dans une cellule à part (§ 8).
+  Log Download repris et terminé par le bot à 02:49 (+1 445 CR, +261 REP).
+- Stratégie des jobs (accord du joueur le 22/10) : tout ce qui est faisable et rapporte, dépôts, amendes,
+  suppressions et IP Injection compris (config du joueur). Ordre sûrs → déchiffrements → piratages, fusible par
+  type et par passage, ICE WALL bloqué = arrêt des mini-jeux, retour sur le marché au passage suivant
+  (`run_jobs`, `tests/test_strategy.py`). Decrypt & Extract et Data Upload codés d'après le joueur, jamais vus.
