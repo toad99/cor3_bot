@@ -712,8 +712,13 @@ class Bot:
         self.log.info("Ouverture de %s", GAME_URL)
         self.page.goto(GAME_URL, wait_until="domcontentloaded", timeout=60000)
         dock = self.page.locator(f'[data-onboarding-300-id="{DOCK["game_center"]}"]')
+        loadout = self.page.locator(comp("LoadoutHeader"))
         try:
-            dock.wait_for(timeout=90000)
+            self.page.locator(f'[data-onboarding-300-id="{DOCK["game_center"]}"]:visible, '
+                              f'{comp("LoadoutHeader")}:visible').first.wait_for(timeout=90000)
+            if not dock.is_visible() and loadout.count():
+                self.leave_loadout()        # le jeu se rouvre sur le dernier écran (passage interrompu)
+                dock.wait_for(timeout=30000)
         except PWTimeout:
             if self.page.locator("input[type=email], input[type=password]").count():
                 raise LoginRequired("profil non connecté : lance `python cor3_bot.py --login`")
@@ -726,6 +731,19 @@ class Bot:
             self.log.warning("Version du jeu %s différente de celle testée (%s) : surveille le journal.",
                              version, TESTED_FRONTEND)
         self.close_all_windows()
+
+    def leave_loadout(self) -> None:
+        """Écran Loadout resté ouvert : le rallumer s'il est éteint, puis « Retour »."""
+        self.log.warning("Le jeu s'est ouvert sur l'écran Loadout : je le rallume si besoin et je le quitte")
+        close = self.page.locator('[data-sentry-element="LoadoutModalCloseButtonStyled"]')
+        if close.count():
+            close.first.click()
+            self.pause(400)
+        if self.page.evaluate("() => localStorage.getItem('loadout-powered')") != "true":
+            self.page.locator('[data-sentry-element="LoadoutHeaderPowerButtonStyled"]').click()
+            self.pause(1500)
+        self.button(self.page, "back").click()
+        self.pause(1200)
 
     def ensure_connected(self) -> None:
         self.check_session()

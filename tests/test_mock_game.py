@@ -392,6 +392,13 @@ def test_next_job_is_found_after_a_failure(make_bot, tmp_path):
     assert bot.page.evaluate("JOBS['m-d4rk'].map(j => j.status)") == ["TAKEN", "TAKEN"]
 
 
+def test_game_reopened_on_the_loadout_screen(make_bot):
+    """Passage interrompu dans le Loadout : le jeu se rouvre sur cet écran ; le bot le rallume et en sort."""
+    bot = make_bot(extra="&screen=loadout")
+    assert bot.page.locator('[data-onboarding-300-id="TabBarItem-NETWORK_MAP"]').is_visible()
+    assert bot.page.evaluate("localStorage.getItem('loadout-powered')") == "true"
+
+
 def test_signed_job_is_finished_and_forgotten(make_bot, tmp_path):
     state = cor3_bot.State(tmp_path / "state.json")
     state.set_job_pending("job-1", "D4RK RM7MI", "Log Download", "RM7-E1L5 en maintenance")

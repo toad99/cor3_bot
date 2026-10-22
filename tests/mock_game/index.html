@@ -32,6 +32,15 @@ const WS_PORT = params.get('ws');
 const SIGNAL_ID = '019aea65-b0c2-70e9-bbbc-8caed416854c';
 const LOG_ID = '019aaaaa-0000-7000-8000-00000000log1';
 window.__mock = { claims: 0, mismatches: 0, iceDone: 0, logs: [], wrongModule: 0 };
+// &screen=loadout : le jeu se rouvre sur l'écran Loadout laissé ouvert (Loadout éteint), sans le dock
+if (params.get('screen') === 'loadout') {
+  localStorage.setItem('loadout-powered', 'false');
+  document.getElementById('dock').style.display = 'none';
+  document.body.insertAdjacentHTML('beforeend', `<div id="loadout-page"><div data-sentry-component="LoadoutHeader">
+    <div data-sentry-element="LoadoutHeaderPowerButtonStyled" onclick="localStorage.setItem('loadout-powered',
+      localStorage.getItem('loadout-powered') === 'true' ? 'false' : 'true')">⏻</div>
+    <button onclick="document.getElementById('loadout-page').remove(); document.getElementById('dock').style.display = ''">Retour</button></div></div>`);
+}
 
 // &exp= : '' aucune expédition, 'running' une expédition en cours, 'nopush' pas de trame get.active du tout
 const EXP = params.get('exp') || '';
