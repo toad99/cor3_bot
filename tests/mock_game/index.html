@@ -356,13 +356,27 @@ function connectTo(id) {
 }
 function openMarket(id) {
   const s = byId(id);
-  openWindow('MARKET', 'Market', el(`<div data-sentry-component="MarketSite"><div data-sentry-component="MarketNav">
-    <button>Marché</button><button onclick="showJobs('${s.marketId}')">Contrats</button><button>Engager</button><button>Infos</button></div></div>`));
+  window.__mock.tab = 'buy';                          // le marché s'ouvre sur l'onglet Marché
+  openWindow('MARKET', 'Market', el(`<div data-sentry-component="MarketSite"><nav data-component-name="MarketNav" data-sentry-component="MarketNav">
+    <button data-component-name="MarketNavItem" data-onboarding-300-id="MarketNavItemBuy" onclick="marketTab('buy')">Marché</button>
+    <button data-component-name="MarketNavItem" data-onboarding-300-id="MarketNavItemJob" onclick="marketTab('jobs', '${s.marketId}')">Contrats</button>
+    <button data-component-name="MarketNavItem" onclick="marketTab('hire')">Engager</button>
+    <button data-component-name="MarketNavItem" data-onboarding-300-id="MarketNavItemInfo" onclick="marketTab('info')">Infos</button></nav></div>`));
   emit('market', 'get.options', {marketId: s.marketId});
+}
+function marketTab(tab, marketId) {   // v1.25.71 : recliquer l'onglet déjà ouvert ne redemande rien au serveur
+  if (tab === window.__mock.tab) return;
+  window.__mock.tab = tab;
+  const body = document.querySelector('[data-sentry-component=MarketSite] .market-body');
+  if (body) body.innerHTML = '';
+  if (tab === 'jobs') showJobs(marketId);
 }
 function showJobs(marketId) {
   window.__mock.contracts.push(marketId);
   renderJobs(marketId);
+  emitJobs(marketId);
+}
+function emitJobs(marketId) {
   const all = JOBS[marketId];
   emit('market', 'get.jobs', {jobs: all.filter(j => j.status === 'AVAILABLE'), recentJobs: all.filter(j => j.status !== 'AVAILABLE'),
                               nextJobsResetAt: new Date(Date.now() + RESET_H[marketId] * 3600e3).toISOString()});
@@ -397,6 +411,7 @@ function signJob(marketId, jobId) {
   takeJob(JOBS[marketId].find(x => x.id === jobId));
   document.querySelectorAll('[data-component-name=JobSideout]').forEach(x => x.remove());
   emit('market', 'job.take', {status: 'ok'});
+  emitJobs(marketId);                 // v1.25.71 : le jeu recharge lui-même la liste après une signature
   renderJobs(marketId);
 }
 function completeJob(marketId, jobId) {

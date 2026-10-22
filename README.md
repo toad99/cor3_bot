@@ -38,8 +38,8 @@ qu'on peut s'y rendre (« Connecter »), puis qu'il pourra s'y connecter : contr
 vient avec le job) ou accès déjà acquis. Un contrat « Access Acquisition » sur un serveur jamais piraté est
 refusé, sauf si tu mets `sign_without_access = true` (il faudra alors le pirater, ICE WALL compris).
 Un job déjà signé qu'on ne peut pas finir tout de suite (maintenance, échec) est noté dans `state.json` : la
-tâche horaire revient sur son marché à la fin de la maintenance, ou 30 min après un échec, sans attendre le
-minuteur. Après une maintenance, l'accès piraté est perdu : le bot
+tâche horaire revient sur son marché à la fin de la maintenance, ou au passage suivant après un échec, sans
+attendre le minuteur. Après une maintenance, l'accès piraté est perdu : le bot
 remet le préréglage de piratage adapté (`hack_presets`), clique ton outil le plus puissant, et si le jeu
 lance ICE WALL, le résout. Un ICE WALL raté verrouille le mini-jeu 20 minutes (déchiffrement compris).
 

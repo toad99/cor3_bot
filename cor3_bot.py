@@ -53,6 +53,9 @@ HOME_SERVER = "Home Server"
 # on rouvre l'onglet Contrats de ce marché : c'est ce que fait le bot.
 DEFAULT_MARKETS = [HOME_SERVER, "D4RK RM7MI", "SRM7-M", "URM7-M"]
 ACTIVE_EXPEDITION = {"PREPARING", "RUNNING", "EVENT", "RETURNING"}
+# Job signé en échec : repris au passage horaire suivant (hh:45). 15 min suffit pour qu'un échec du
+# passage de 02:15 soit repris à 02:45 (avec 30 min, un échec à 02:15:34 attendait 03:45).
+JOB_RETRY = dt.timedelta(minutes=15)
 
 # ---------------------------------------------------------------------------
 # Sélecteurs. On s'appuie sur des attributs posés par le build du jeu :
@@ -254,12 +257,12 @@ class State:
                         retry_at: dt.datetime | None = None, now: dt.datetime | None = None,
                         deadline: dt.datetime | None = None) -> None:
         """Job signé mais pas terminé (maintenance, route coupée, échec) : on revient sur son marché à
-        retry_at (30 min par défaut) au lieu d'attendre le renouvellement du minuteur. deadline : échéance
+        retry_at (JOB_RETRY par défaut) au lieu d'attendre le renouvellement du minuteur. deadline : échéance
         du job (pour information : un job expiré disparaît des jobs signés et sort d'ici)."""
         now = now or utc_now()
         self.data["pending_jobs"][str(job_id)] = {
             "market": market, "name": name, "problem": problem,
-            "retry_at": (retry_at or now + dt.timedelta(minutes=30)).isoformat(timespec="seconds"),
+            "retry_at": (retry_at or now + JOB_RETRY).isoformat(timespec="seconds"),
             "deadline": deadline.isoformat(timespec="seconds") if deadline else None}
 
     def clear_job_pending(self, job_id: Any) -> None:
@@ -1029,15 +1032,32 @@ class Bot:
         market.locator(comp("MarketNav")).get_by_role("button", name=rx(TXT[key])).first.click()
         self.pause(800)
 
-    def load_jobs(self, market: Locator, name: str | None = None) -> dict:
-        """Onglet Contrats. L'ouvrir après l'échéance du minuteur relance la liste et le minuteur ;
-        recliquer l'onglet rafraîchit la liste (astuce du guide)."""
+    def fetch_jobs(self, market: Locator, since: int | None = None) -> dict:
+        """Liste des contrats (market:get.jobs). since : le jeu l'a déjà redemandée de lui-même (après une
+        signature). Recliquer l'onglet Contrats déjà ouvert ne redemande rien (v1.25.71) : on passe alors
+        par l'onglet Marché et on revient."""
+        if since is not None:
+            found = self.events.last("market", "get.jobs", since=since)
+            if found:
+                return found.data or {}
+        mark = self.events.mark()
+        self.market_tab(market, "contracts")
+        try:
+            return self.wait_event("market", "get.jobs", mark, timeout=4).data or {}
+        except StepFailed:
+            self.log.debug("Onglet Contrats déjà ouvert : passage par l'onglet Marché pour recharger la liste")
+        mark = self.events.mark()
+        self.market_tab(market, "market")
+        self.market_tab(market, "contracts")
+        return self.wait_event("market", "get.jobs", mark, timeout=15).data or {}
+
+    def load_jobs(self, market: Locator, name: str | None = None, since: int | None = None) -> dict:
+        """Onglet Contrats. L'ouvrir après l'échéance du minuteur relance la liste et le minuteur.
+        since : voir fetch_jobs."""
         name = name or self._market_name or HOME_SERVER
         data: dict = {}
         for attempt in (1, 2):
-            mark = self.events.mark()
-            self.market_tab(market, "contracts")
-            data = self.wait_event("market", "get.jobs", mark, timeout=15).data or {}
+            data = self.fetch_jobs(market, since if attempt == 1 else None)
             reset = parse_time(data.get("nextJobsResetAt"))
             if reset is None or reset > utc_now() or attempt == 2:
                 break
@@ -1152,7 +1172,9 @@ class Bot:
                 return card
         raise StepFailed(f"carte introuvable pour le job {job['name']} ({server})")
 
-    def sign_job(self, market: Locator, job: dict) -> None:
+    def sign_job(self, market: Locator, job: dict) -> int | None:
+        """Signe le job ; renvoie le repère des trames d'avant la signature (None en --dry-run) : le jeu
+        recharge ensuite la liste de lui-même, load_jobs(since=...) la reprend."""
         self.close_window(comp("ServerAdministrationInterfaceApplication"))   # règle du guide
         card = self.find_job_card(market, job)
         more = self.button(card, "read_more")
@@ -1169,12 +1191,13 @@ class Bot:
         if not self.allowed(f"signer le job {job['name']} ({self.job_server(job) or '-'}, "
                             f"{job.get('rewardCredits')} CR, dépôt {job.get('deposit', 0)} CR)"):
             self.button(side, r"^\s*(Annuler|Cancel)\s*$").click()
-            return
+            return None
         mark = self.events.mark()
         self.button(side, "sign").click()
         ev = self.wait_event("market", "job.take", mark, timeout=15)
         if (ev.data or {}).get("status") != "ok":
             raise StepFailed(f"signature refusée : {ev.data}")
+        return mark
 
     def complete_job(self, market_name: str, job: dict) -> None:
         market = self.open_market(market_name)
@@ -1269,12 +1292,12 @@ class Bot:
                     handled.add(job.get("id"))
                     signed, current = False, job
                     try:
-                        self.sign_job(self.open_market(name), job)
+                        since = self.sign_job(self.open_market(name), job)
                         budget -= 1                 # compté dès la signature, même si la suite échoue
                         if self.dry_run:
                             continue
                         signed = True
-                        recent = self.load_jobs(self.open_market(name), name).get("recentJobs") or []
+                        recent = self.load_jobs(self.open_market(name), name, since=since).get("recentJobs") or []
                         current = next((j for j in recent if j.get("id") == job.get("id")), job)   # cibles, échéance
                         self.perform_job(current)
                         self.complete_job(name, current)
@@ -1298,7 +1321,7 @@ class Bot:
     def _job_error(self, exc: Exception, label: str, job: dict, notes: list[str], failed: list[str],
                    soft: bool, market: str | None = None) -> None:
         """Simulation (et indisponibilité d'un job déjà signé) -> note ; le reste -> échec + alerte.
-        Job signé (market donné) : noté pour être repris à la fin de la maintenance, sinon dans 30 min."""
+        Job signé (market donné) : noté pour être repris à la fin de la maintenance, sinon au passage suivant."""
         if market and not isinstance(exc, Simulated):
             problem = (str(exc).splitlines() or [type(exc).__name__])[0][:200]
             self._job_pending(job, market, problem, getattr(exc, "retry_at", None))

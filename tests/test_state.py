@@ -97,11 +97,13 @@ def test_signed_job_brings_its_market_back(tmp_path):
     assert again.market_due("D4RK RM7MI", NOW + dt.timedelta(hours=1))
     again.prune_pending("D4RK RM7MI", set())                    # plus signé : terminé à la main ou expiré
     assert not again.market_due("D4RK RM7MI", NOW + dt.timedelta(hours=1))
-    again.set_job_pending("job-2", "URM7-M", "Data Download", "échec", now=NOW)      # 30 min par défaut
-    assert not again.market_due("URM7-M", NOW + dt.timedelta(minutes=29))
-    assert again.market_due("URM7-M", NOW + dt.timedelta(minutes=30))
+    # échec à hh:15:34 (comme le passage de 02:15) : repris par la tâche horaire de hh:45, pas une heure après
+    failed_at, next_run = NOW + dt.timedelta(minutes=15, seconds=34), NOW + dt.timedelta(minutes=45, seconds=2)
+    again.set_job_pending("job-2", "URM7-M", "Data Download", "échec", now=failed_at)
+    assert not again.market_due("URM7-M", failed_at + dt.timedelta(minutes=14))
+    assert again.market_due("URM7-M", next_run)
     again.clear_job_pending("job-2")
-    assert not again.market_due("URM7-M", NOW + dt.timedelta(minutes=30))
+    assert not again.market_due("URM7-M", next_run)
     # le marché lui-même en maintenance prime sur le job à reprendre (pas de passage inutile)
     state.set_market_retry("D4RK RM7MI", NOW + dt.timedelta(hours=2), "D4RK RM7MI en maintenance", now=NOW)
     assert not state.market_due("D4RK RM7MI", NOW + dt.timedelta(hours=1))

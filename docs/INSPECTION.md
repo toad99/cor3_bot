@@ -104,7 +104,8 @@ v1.25.71 ✅ (relevé `ws_dump` du 21/10 à 23:44) :
   `.game-center-card-title`, « Open Module » = `.game-center-card-cta`). Le bot prend le plus petit ancêtre du
   titre **de n'importe quelle balise** qui contient « Open Module » : `ancestor::div` sautait le `<button>` et
   remontait jusqu'à la grille, qui contient les deux cartes. Vérifié en direct le 21/10 au soir jusqu'à l'état de
-  la daily (« déjà faite ») ; les mini-jeux n'ont pas encore été revus en v1.25.71.
+  la daily (« déjà faite »), puis Signal Decode réussi le 22/10 à 02:15 (code 155, easy, série 3). System Log
+  Integrity n'a pas encore été revu en v1.25.71.
 - `currentGameId` du 21/10 UTC : `019aea65-b0c2-7695-8bed-7b66cd57545c`, sans doute System Log Integrity (la daily
   validée ce jour-là) ❓. Le bot reconnaît Signal Decode à son id (`APP_SIGNAL_DECODE`) et joue System Log Integrity sinon.
 - Une daily par jour, tirée côté serveur, **reset à 00:00 UTC** (02:00 à Paris l'été, 01:00 l'hiver).
@@ -173,8 +174,13 @@ v1.25.71 ✅ (relevé `ws_dump` du 21/10 à 23:44) :
   sa réputation, ses mercenaires (« Engager ») et **son propre minuteur** `nextJobsResetAt` (renvoyé par `get.jobs`).
 - **Quand le minuteur est échu, il ne repart que si on rouvre l'onglet Contrats de ce marché** (observé, et
   demandé par le joueur) : `get.jobs` renvoie alors une nouvelle liste et un nouveau `nextJobsResetAt`.
-  Recliquer l'onglet Contrats rafraîchit la liste (astuce du guide). Le bot mémorise chaque minuteur dans
-  `state.json` et le mode `--auto` rouvre chaque marché à l'échéance.
+  Le bot mémorise chaque minuteur dans `state.json` et le mode `--auto` rouvre chaque marché à l'échéance.
+- v1.25.71 ✅ (22/10) : `nav[data-component-name="MarketNav"]`, onglets `MarketNavItem` avec
+  `data-onboarding-300-id` `MarketNavItemBuy` (Marché, ouvert par défaut), `MarketNavItemJob` (Contrats),
+  `MarketNavItemInfo` (Infos) ; « Engager » n'a pas d'id. **Recliquer l'onglet Contrats déjà ouvert ne redemande
+  plus rien** (en v1.25.51 ça rafraîchissait la liste, astuce du guide) : passer par un autre onglet et revenir.
+  Après `market:job.take`, le client redemande de lui-même `get.credits` et `get.jobs` : le bot reprend cette
+  liste (`load_jobs(since=…)`). Sans ça, le passage de 02:15 du 22/10 a signé un Log Download sans le faire.
 - Si `get.options` contient un `marketId`, le bot vérifie qu'il correspond à celui du serveur sur la carte ❓.
 - v1.25.71 ✅ : `get.options` = `{market: {id, marketName, marketCorp, marketServer (id du serveur), jobSection,
   hireSection, buySection, sellSection}, reputation: {level, progress, requiredReputation, faction}, userCredits}` ;
@@ -330,8 +336,8 @@ v1.25.71 ✅ (relevé `ws_dump` du 21/10 à 23:44) :
 - Unité de `timeUntilMaintenance`, et valeur de `canSetEndpoint` quand un nœud de la route est en maintenance.
 - Minuteurs de Home Server et D4RK RM7MI ; comportement exact d'un marché en maintenance.
 - Engager depuis un autre marché que Home Server (`hire_market`).
-- v1.25.71 : les mini-jeux de la daily, et les Expéditions avec une expédition en cours (mise à jour de la liste
-  pendant le suivi et après un engagement, § 11).
+- v1.25.71 : System Log Integrity, le terminal SAI et la fin d'un job par le bot, et les Expéditions avec une
+  expédition en cours (mise à jour de la liste pendant le suivi et après un engagement, § 11).
 
 ## 14. Ce qui a été fait sur le compte pendant l'inspection (avec l'accord du joueur)
 

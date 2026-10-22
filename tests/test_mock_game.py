@@ -218,6 +218,15 @@ def test_run_jobs_visits_the_four_markets(make_bot, tmp_path):
     assert bot.run_jobs() == "aucun minuteur de marché échu"
 
 
+def test_jobs_reload_when_contracts_tab_is_already_open(make_bot):
+    """v1.25.71 : recliquer l'onglet Contrats déjà ouvert ne redemande rien au serveur ; le bot passe par
+    l'onglet Marché pour recharger la liste (fin d'un job sans avoir fermé le marché)."""
+    bot = make_bot()
+    bot.load_jobs(bot.open_market("Home Server"))
+    bot.load_jobs(bot.open_market("Home Server"))           # même fenêtre, onglet déjà ouvert
+    assert mock(bot)["contracts"] == ["m-home", "m-home"]
+
+
 @pytest.mark.parametrize("hack", ["auto", "ice"])
 def test_open_sai_hacks_again_when_access_is_lost(make_bot, hack):
     bot = make_bot(extra=f"&hack={hack}")
@@ -362,7 +371,7 @@ def test_signed_job_blocked_by_maintenance_waits_for_its_end(make_bot, tmp_path)
 
 
 def test_job_failing_after_signature_is_retried_soon(make_bot, tmp_path):
-    """Signé, puis connexion impossible (pas d'accès par tâche, aucun outil) : alerte, et reprise dans 30 min."""
+    """Signé, puis connexion impossible (pas d'accès par tâche, aucun outil) : alerte, et reprise au passage suivant."""
     state = cor3_bot.State(tmp_path / "state.json")
     bot = make_bot(extra="&jobs=1&grant=0&hack=none", state=state)
     with pytest.raises(cor3_bot.StepFailed, match="aucun outil") as failure:
