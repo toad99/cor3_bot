@@ -292,7 +292,12 @@ v1.25.71 ✅ (relevé `ws_dump` du 21/10 à 23:44) :
     paire de boutons de la ligne visée et vérifie le nom du fichier sur la ligne avant de cliquer ;
   - **ACCÈS DE TRANSIT** (`SaiTransit`) : titre « Liste noire », bouton d'ajout
     `[data-component-name="SaiAddButton"]` (icône `AddUserIcon`), tableau Adresse IP / Durée d'accès / Action.
-    La fenêtre d'ajout (`SaiAddIpModal`) n'a pas encore été vue ❓.
+    Ajout d'IP ✅ (22/10, 3 IP Injection réussies). Lignes : icône + IP, durée, **un bouton poubelle sans
+    icône nommée** (rouge) : le bot prend le plus grand bloc autour de l'IP qui ne contient qu'un bouton.
+  - Bouton d'envoi de FICHIERS : l'icône est nommée en `data-sentry-element="UploadIcon"` (pas `-component`).
+  - Decrypt & Extract : après l'ICE WALL réussi, `desktop:update.file` arrive avec l'id du fichier téléchargé,
+    pas l'id « j_… » du job : le bot accepte alors n'importe quel `update.file`.
+  - Le raccourci Downloads du bureau peut être caché par une fenêtre : double-clic DOM en secours.
 - Dock ✅ (22/10) : `LoadoutTabBarItem` existe toujours, mais le dock peut être caché (fenêtre Marché ouverte en
   grand) : le clic normal échoue, le bot fait un clic DOM (`safe_click`).
 - Suppression ❓ : fenêtre `[data-component-name="SaiDeleteModal"]`, boutons `SaiDeleteButtons` (dernier = confirmer).

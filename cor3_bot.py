@@ -1655,7 +1655,12 @@ class Bot:
         self.apply_preset(presets.get(ext, presets.get("default", "decrypt")))
 
         self.close_all_windows()
-        self.page.locator(comp("DesktopShortcutComponent")).filter(has_text=rx(r"^\s*Downloads\s*$")).dblclick()
+        shortcut = self.page.locator(comp("DesktopShortcutComponent")).filter(has_text=rx(r"^\s*Downloads\s*$")).first
+        try:
+            shortcut.dblclick(timeout=5000)
+        except PWError:                         # une fenêtre devant : double-clic DOM
+            self.log.debug("Double-clic bloqué sur Downloads : double-clic DOM à la place")
+            shortcut.dispatch_event("dblclick")
         folder = self.window(comp("FolderApplication"))
         folder.wait_for(timeout=10000)
         icon = folder.locator(f'{comp("FolderShortcut")}[data-app-id="{target["id"]}"]')
@@ -1663,7 +1668,10 @@ class Bot:
             icon = folder.locator(comp("FolderShortcut")).filter(has_text=target.get("name", "")[:12])
         if not icon.count():        # Decrypt & Extract : le fichier téléchargé n'a pas l'extension annoncée
             icon = folder.locator(comp("FolderShortcut")).filter(has_text=stem(target.get("name", "")))
-        icon.first.dblclick()
+        try:
+            icon.first.dblclick(timeout=5000)
+        except PWError:
+            icon.first.dispatch_event("dblclick")
         analysis = self.window(comp("FileAnalysisProtocolApplication"))
         analysis.wait_for(timeout=10000)
         decrypt = self.button(analysis, "decrypt")
@@ -1692,8 +1700,10 @@ class Bot:
             if lock:
                 until = lock[-1].data["lockExpiresAt"]
                 raise IceWallLocked(f"ICE WALL perdu, mini-jeu verrouillé jusqu'à {local_time(until)}", parse_time(until))
+            # Decrypt & Extract : l'id du job (« j_… ») n'est pas celui du fichier téléchargé
+            real_id = not str(target.get("id", "")).startswith("j_")
             updated = self.events.find(mark, "desktop", "update.file",
-                                       pred=lambda e: ((e.data or {}).get("file") or {}).get("id") == target["id"])
+                                       pred=lambda e: not real_id or ((e.data or {}).get("file") or {}).get("id") == target["id"])
             if updated or self.events.find(mark, "market", "job.can-complete"):
                 self.log.info("Fichier %s déchiffré", target.get("name"))
                 break
@@ -2005,7 +2015,8 @@ class Bot:
         mark = self.events.mark()
         sai.locator(comp("SaiHeader")).get_by_role("button", name=rx(TXT["tab_files"])).click()
         self.wait_event("sai", "get.files", mark, timeout=15)
-        upload = sai.locator("button").filter(has=self.page.locator(comp("UploadIcon")))
+        upload = sai.locator("button").filter(
+            has=self.page.locator('[data-sentry-element="UploadIcon"], [data-sentry-component="UploadIcon"]'))
         if not upload.count():
             raise StepFailed("pas d'icône d'envoi (UploadIcon) dans l'onglet FICHIERS")
         upload.first.click()
@@ -2051,13 +2062,14 @@ class Bot:
                 modal.locator(cname("SaiAddIpModalIpInput")).fill(ip)
                 modal.locator(cname("SaiAddIpModalSaveButton")).click()
             else:
-                row = sai.get_by_text(ip, exact=True).locator(
-                    "xpath=ancestor::div[.//*[@data-sentry-component='TrashIcon']][1]")
+                # v1.25.71 : ligne IP / durée / bouton poubelle sans icône nommée ; la ligne = le plus grand
+                # bloc autour de l'IP qui ne contient qu'un bouton
+                row = sai.get_by_text(ip, exact=True).first.locator("xpath=ancestor::div[count(.//button)=1][last()]")
                 if not row.count():
                     raise StepFailed(f"IP {ip} absente de la liste de transit")
                 if not self.allowed(f"supprimer l'IP {ip} sur {server}"):
                     continue
-                row.locator("button").filter(has=self.page.locator(comp("TrashIcon"))).click()
+                row.locator("button").last.click()
                 modal = self.page.locator(cname("SaiDeleteModal"))
                 modal.wait_for(timeout=8000)
                 modal.locator(cname("SaiDeleteButtons")).get_by_role("button").last.click()
