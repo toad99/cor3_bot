@@ -111,3 +111,21 @@ def test_xpath_literal():
     assert cor3_bot.xpath_literal("log_1.ab52p") == "'log_1.ab52p'"
     assert cor3_bot.xpath_literal("it's") == '"it\'s"'
     assert cor3_bot.xpath_literal("a'b\"c") == "concat('a', \"'\", 'b\"c')"
+
+
+def test_decrypt_and_extract_target_found_by_name_without_extension():
+    """Le job annonce « db_6531.txt », le nœud a « db_6531.bak » ; l'id « j_… » n'est pas celui du fichier."""
+    items = [{"id": "f1", "name": "db_9736.dat"}, {"id": "f2", "name": "db_6531.bak"}, {"id": "f3", "name": "x.enc"}]
+    details = {"extensions": [{"ext": ".ab52p", "encryptionLevel": [14, 26]}],
+               "files": [{"id": "j_01a16168", "name": "db_6531.txt", "isDecrypted": False}]}
+    assert cor3_bot.Bot._find_target(items, details, "files") == 1
+    with pytest.raises(cor3_bot.StepFailed):         # deux fichiers du même nom : on ne devine pas
+        cor3_bot.Bot._find_target(items + [{"id": "f4", "name": "db_6531.log"}], details, "files")
+
+
+def test_hopeless_decrypt_is_lost_not_retried_and_keeps_the_fuse(tmp_path):
+    bot, state, signed = make_bot(tmp_path, fail={"decrypt-1": cor3_bot.Hopeless("module trop faible")})
+    with pytest.raises(cor3_bot.StepFailed):
+        bot.run_jobs()
+    assert signed == ["data-ok", "log-ok", "decrypt-1", "decrypt-2", "log-hack"]   # le fusible ne saute pas
+    assert "decrypt-1" not in state.pending_jobs() and state.job_lost("decrypt-1")

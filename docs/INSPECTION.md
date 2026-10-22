@@ -199,7 +199,16 @@ v1.25.71 ✅ (relevé `ws_dump` du 21/10 à 23:44) :
   « Decrypt & Extract ») et `UploadFile` (« Data Upload »). D'après le joueur (22/10) : Decrypt & Extract =
   télécharger le fichier sur le nœud (FICHIERS), puis le déchiffrer dans Downloads ; Data Upload = FICHIERS →
   icône d'envoi → naviguer dans Downloads → cliquer le fichier cible. Codés ainsi (`do_upload_job` cherche
-  `UploadIcon`), jamais vus par le bot ❓ : les détails du job signé et la fenêtre d'envoi restent à relever. Le nom ne
+  `UploadIcon`), jamais vus par le bot ❓ : les détails du job signé et la fenêtre d'envoi restent à relever.
+- Decrypt & Extract ✅ (22/10, 04:20, URM7-W4L2) : une fois signé, `details = {extensions: [{ext: ".ab52p",
+  encryptionLevel: [14, 26]}], files: [{id: "j_01a16168", name: "db_6531.txt"}]}`, mais **sur le nœud le fichier
+  s'appelle `db_6531.bak`** : même nom, extension inconnue d'avance (dit le joueur : mp3, png…). L'`id` « j_… »
+  n'est pas celui du fichier (le même revenait sur un Data Download) : le bot l'ignore et cherche le nom sans
+  extension, seulement s'il est unique. Le préréglage se choisit d'après `extensions[].ext`, pas d'après le nom.
+- 22/10 de 04:10 à 04:20 ✅ : 5 déchiffrements ICE WALL réussis (4 sur Home Server, `.eb52x [4, 10]` et `.ab52p [7, 15]` ;
+  1 sur D4RK, `.eb52x [14, 25]`), 2 IP Injection, 2 Data Download, 2 Log Deletion, puis plus tôt 2 File
+  Elimination. Échec « module trop faible » : `.xvct [22, 27]` (SRM7-M) avec « big decrypt » → pas de bouton
+  Déchiffrer. Le bot classe alors le job perdu (`Hopeless`, `lost_jobs` dans `state.json`) et n'y retouche plus. Le nom ne
   suffit pas à reconnaître un job : « Data Download » existe aussi avec un type géré (URM7-M), seul `jobType` compte.
 - v1.25.71 ✅ (relevé `ws_dump` du 21/10) : `conditions = {hasDeposit, hasRepFine, serverConfigId, items[]}`,
   chaque élément `{type, label, isPrimary, subsystem, details}`. La tâche principale a `isPrimary: true` et

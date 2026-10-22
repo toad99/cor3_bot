@@ -147,6 +147,11 @@ class IceWallLocked(StepFailed):
         self.retry_at = retry_at
 
 
+class Hopeless(StepFailed):
+    """Job signé impossible à finir (module de déchiffrement trop faible pour le fichier tiré) : le dépôt
+    ou l'amende sont perdus, inutile de réessayer."""
+
+
 class Simulated(StepFailed):
     """Mode --dry-run : la suite dépend d'une action qu'on n'a pas faite (ex. piratage)."""
 
@@ -191,6 +196,11 @@ def local_time(value: Any) -> str:
     """Heure locale lisible (journal, alertes)."""
     when = parse_time(value)
     return when.astimezone().strftime("%d/%m %H:%M") if when else "?"
+
+
+def stem(name: str) -> str:
+    """Nom de fichier sans son extension : « db_6531.txt » -> « db_6531 »."""
+    return name.rsplit(".", 1)[0] if "." in name else name
 
 
 def xpath_literal(text: str) -> str:
@@ -293,6 +303,17 @@ class State:
             "market": market, "name": name, "problem": problem,
             "retry_at": (retry_at or now + JOB_RETRY).isoformat(timespec="seconds"),
             "deadline": deadline.isoformat(timespec="seconds") if deadline else None}
+
+    def mark_job_lost(self, job_id: Any) -> None:
+        """Job signé impossible à finir : ne plus jamais le retenter (il expirera tout seul)."""
+        self.clear_job_pending(job_id)
+        lost = self.data.setdefault("lost_jobs", [])
+        if str(job_id) not in lost:
+            lost.append(str(job_id))
+        del lost[:-50]
+
+    def job_lost(self, job_id: Any) -> bool:
+        return str(job_id) in (self.data.get("lost_jobs") or [])
 
     def clear_job_pending(self, job_id: Any) -> None:
         self.data["pending_jobs"].pop(str(job_id), None)
@@ -1312,6 +1333,9 @@ class Bot:
                     if job.get("status") != "TAKEN" or job.get("id") in handled:
                         continue
                     handled.add(job.get("id"))
+                    if self.state is not None and self.state.job_lost(job.get("id")):
+                        self.log.info("Job signé %s (%s) déjà classé perdu : je n'y touche plus", job["name"], name)
+                        continue
                     refusal = self.job_type_refusal(job)
                     blocked = None if refusal else self.server_problem(job)
                     if (refusal or blocked) and not job.get("canComplete"):
@@ -1369,7 +1393,7 @@ class Bot:
                                         market=name if signed else None)
                         if isinstance(exc, IceWallLocked):
                             ice = exc
-                        elif signed and not isinstance(exc, Unavailable):
+                        elif signed and not isinstance(exc, (Unavailable, Hopeless)):
                             blown.add(job.get("jobType"))
                 if left and self.state is not None and not self.dry_run:
                     when = utc_now() + JOB_RETRY
@@ -1394,7 +1418,11 @@ class Bot:
                    soft: bool, market: str | None = None) -> None:
         """Simulation (et indisponibilité d'un job déjà signé) -> note ; le reste -> échec + alerte.
         Job signé (market donné) : noté pour être repris à la fin de la maintenance, sinon au passage suivant."""
-        if market and not isinstance(exc, Simulated):
+        if market and isinstance(exc, Hopeless):
+            if self.state is not None:
+                self.state.mark_job_lost(job.get("id"))
+            label += self.deadline_text(job)
+        elif market and not isinstance(exc, Simulated):
             problem = (str(exc).splitlines() or [type(exc).__name__])[0][:200]
             self._job_pending(job, market, problem, getattr(exc, "retry_at", None))
             label += self.deadline_text(job)
@@ -1621,7 +1649,8 @@ class Bot:
         if not files:
             raise StepFailed("job de déchiffrement sans fichier")
         target = files[0]
-        ext = (target.get("name", "").rsplit(".", 1)[-1] or "").lower()
+        announced = [e.get("ext") for e in details.get("extensions") or [] if isinstance(e, dict) and e.get("ext")]
+        ext = (announced[0] if announced else target.get("name", "").rsplit(".", 1)[-1] or "").lstrip(".").lower()
         presets = self.cfg["jobs"].get("decrypt_presets", {})
         self.apply_preset(presets.get(ext, presets.get("default", "decrypt")))
 
@@ -1632,6 +1661,8 @@ class Bot:
         icon = folder.locator(f'{comp("FolderShortcut")}[data-app-id="{target["id"]}"]')
         if not icon.count():
             icon = folder.locator(comp("FolderShortcut")).filter(has_text=target.get("name", "")[:12])
+        if not icon.count():        # Decrypt & Extract : le fichier téléchargé n'a pas l'extension annoncée
+            icon = folder.locator(comp("FolderShortcut")).filter(has_text=stem(target.get("name", "")))
         icon.first.dblclick()
         analysis = self.window(comp("FileAnalysisProtocolApplication"))
         analysis.wait_for(timeout=10000)
@@ -1642,7 +1673,8 @@ class Bot:
             if self.dry_run:
                 self.log.info("[SIMULATION] pas de bouton Déchiffrer (le préréglage n'a pas été appliqué)")
                 return
-            raise StepFailed("pas de bouton Déchiffrer : programme de déchiffrement absent ou trop faible")
+            raise Hopeless("pas de bouton Déchiffrer avec ce préréglage : module trop faible pour ce fichier "
+                           f"(niveau {details.get('encryptionLevel')}), job perdu")
         if not self.allowed(f"lancer le déchiffrement de {target.get('name')}"):
             return
         mark = self.events.mark()
@@ -1937,7 +1969,9 @@ class Bot:
         départagés par le numéro de séquence fourni par le job, sinon par source == 'job'."""
         files = [f for f in details.get("files") or [] if isinstance(f, dict)]
         seqs = details.get("logSeqs") or details.get("fileSeqs") or []
-        ids = details.get("fileIds") or details.get("logIds") or [f.get("id") for f in files if f.get("id")]
+        # « j_… » n'est pas l'id du fichier sur le serveur (le même revient sur plusieurs jobs)
+        ids = [i for i in (details.get("fileIds") or details.get("logIds") or [f.get("id") for f in files])
+               if i and not str(i).startswith("j_")]
         names = (details.get("logNames") or details.get("fileNames") or details.get("names")
                  or [f.get("name") for f in files if f.get("name")])
         for i, it in enumerate(items):
@@ -1951,6 +1985,12 @@ class Bot:
             candidates = [i for i in candidates if items[i].get("source") == "job"] or candidates
         if len(candidates) == 1:
             return candidates[0]
+        if not candidates and names and list_key == "files":
+            # Decrypt & Extract : le job annonce « db_6531.txt », le nœud a « db_6531.bak » (extension inconnue)
+            stems = {stem(n) for n in names}
+            candidates = [i for i, it in enumerate(items) if stem(it.get("name") or "") in stems]
+            if len(candidates) == 1:
+                return candidates[0]
         raise StepFailed(f"cible introuvable ou ambiguë dans {list_key} : {details}")
 
     def do_upload_job(self, job: dict, details: dict) -> None:
