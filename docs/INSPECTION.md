@@ -318,6 +318,11 @@ v1.25.71 ✅ (relevé `ws_dump` du 21/10 à 23:44) :
   Fermer avec `[data-sentry-element=LoadoutModalCloseButtonStyled]` : **le premier bouton de la fenêtre est
   « ENREGISTRER LA CONFIGURATION ACTUELLE », ne pas le cliquer**. « Retour » pour quitter l'écran.
 - Préréglages du joueur : decrypt, big decrypt, hack, hack t4, hack soyuz.
+- v1.25.71 (22/10) : `PresetRow` → nom dans `[data-sentry-element="PresetRowNameStyled"]`, composants (CPU, GPU,
+  RAM, PSU, logiciel : « Cypher+ v1.4 » pour decrypt, « Porter-lite r4 » pour hack, « Porter-triX lr8 » pour
+  hack t4) ; boutons Appliquer / Actif (désactivé) / Écraser / Renommer / Supprimer ; compteur « 5/10 ». Les
+  lignes s'affichent après la fenêtre : attendre la première. Si le bot échoue au milieu, il referme la
+  fenêtre, **rallume le Loadout** et quitte l'écran (sinon il restait éteint et bloquait la suite du passage).
 
 ## 11. Mercenaires ✅ (Crimson engagé le 21/10 : −5 466 CR, butin en inventaire)
 

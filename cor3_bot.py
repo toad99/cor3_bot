@@ -1555,27 +1555,40 @@ class Bot:
             self.pause(1200)
         self.button(self.page, "presets").click()
         modal = self.page.locator(cname("PresetsModal"))
-        modal.wait_for(timeout=8000)
-        rows = modal.locator(comp("PresetRow"))
-        row = None
-        for i in range(rows.count()):
-            if rows.nth(i).inner_text().split("\n")[0].strip() == name:
-                row = rows.nth(i)
-        if row is None:
-            raise StepFailed(f"préréglage « {name} » introuvable")
-        mark = self.events.mark()
-        apply_btn = self.button(row, "apply")
-        if apply_btn.count():                    # sinon il est déjà ACTIF
-            apply_btn.click()
-            self.wait_event("loadout", "apply.preset", mark, timeout=15)
-        # Fermer avec la croix (le 1er bouton de la fenêtre est « Enregistrer la configuration »)
-        self.page.locator('[data-sentry-element="LoadoutModalCloseButtonStyled"]').first.click()
-        self.pause(400)
-        if not powered():
-            power.click()
-            self.pause(1500)
-        self.button(self.page, "back").click()
-        self.pause(1200)
+        try:
+            modal.wait_for(timeout=8000)
+            rows = modal.locator(comp("PresetRow"))
+            rows.first.wait_for(timeout=8000)           # les lignes arrivent après la fenêtre
+            self.pause(300)
+            row = None
+            for i in range(rows.count()):
+                # v1.25.71 : le nom a son propre élément (le texte de la ligne mélange nom et composants)
+                label = rows.nth(i).locator('[data-sentry-element="PresetRowNameStyled"]')
+                text = label.first.inner_text() if label.count() else rows.nth(i).inner_text().split("\n")[0]
+                if text.strip() == name:
+                    row = rows.nth(i)
+            if row is None:
+                raise StepFailed(f"préréglage « {name} » introuvable parmi {rows.count()} préréglage(s)")
+            mark = self.events.mark()
+            apply_btn = self.button(row, "apply")
+            if apply_btn.count():                    # sinon il est déjà ACTIF
+                apply_btn.click()
+                self.wait_event("loadout", "apply.preset", mark, timeout=15)
+        finally:
+            # quoi qu'il arrive : fermer la fenêtre, rallumer le Loadout, quitter l'écran
+            # (fermer avec la croix : le 1er bouton de la fenêtre est « Enregistrer la configuration »)
+            try:
+                close = self.page.locator('[data-sentry-element="LoadoutModalCloseButtonStyled"]')
+                if close.count():
+                    close.first.click()
+                    self.pause(400)
+                if not powered():
+                    power.click()
+                    self.pause(1500)
+                self.button(self.page, "back").click()
+                self.pause(1200)
+            except PWError as exc:
+                self.log.warning("Loadout : remise en ordre incomplète (%s) : vérifie qu'il est allumé", exc)
         self._current_preset = name
         self.log.info("Préréglage « %s » actif", name)
 
