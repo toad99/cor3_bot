@@ -2020,23 +2020,35 @@ class Bot:
         if not upload.count():
             raise StepFailed("pas d'icône d'envoi (UploadIcon) dans l'onglet FICHIERS")
         upload.first.click()
-        self.pause(800)
-        not_desktop = "not(ancestor::*[@data-sentry-component='DesktopShortcutComponent'])"
-        downloads = self.page.locator(f"xpath=//*[normalize-space(text())='Downloads' and {not_desktop}]")
-        if downloads.count():
-            downloads.last.click()
-            self.pause(800)
-        target = self.page.locator(f"xpath=//*[contains(normalize-space(text()), {xpath_literal(names[0])}) "
-                                   f"and {not_desktop}]")
+        # v1.25.71 : fenêtre « Sélectionner un fichier à envoyer », ouverte sur ./Bureau/Downloads
+        items = self.page.locator(cname("FilePickerItem"))
         try:
-            target.last.wait_for(timeout=8000)
-        except PWTimeout:
-            raise StepFailed(f"fichier {names[0]} introuvable dans la fenêtre d'envoi")
-        if not self.allowed(f"envoyer {names[0]} sur {server}"):
-            return
-        mark = self.events.mark()
-        target.last.click()
-        self.wait_event("sai", "file.upload", mark, timeout=20)
+            items.first.wait_for(timeout=10000)
+            crumbs = self.page.locator(cname("FilePickerBreadcrumbs"))
+            if crumbs.count() and "Downloads" not in crumbs.inner_text():
+                items.filter(has_text=rx(r"^\s*Downloads\s*$")).first.dblclick()
+                self.pause(800)
+            target = items.filter(has_text=stem(names[0]))
+            if not target.count():
+                raise StepFailed(f"fichier {names[0]} introuvable dans Downloads (fenêtre d'envoi)")
+            target.first.click()
+            self.pause(300)
+            chosen = self.page.locator(cname("FilePickerFileName")).inner_text().strip()
+            if chosen != names[0]:
+                raise StepFailed(f"fichier sélectionné « {chosen} » au lieu de « {names[0]} » : rien n'est envoyé")
+            if not self.allowed(f"envoyer {names[0]} sur {server}"):
+                return
+            mark = self.events.mark()
+            self.page.locator(cname("FilePickerAttachButton")).click()
+            try:                        # nom exact de la trame pas encore relevé : la liste des jobs tranchera
+                self.wait_event("sai", "file.upload", mark, timeout=20)
+            except StepFailed:
+                self.log.info("Pas de trame « sai:file.upload » : vérification dans la liste des jobs")
+        finally:
+            close = self.page.locator(cname("FilePickerCloseButton"))
+            if close.count() and close.first.is_visible():
+                close.first.click()
+                self.pause(300)
         self._expect_can_complete(mark)
         self.close_window(comp("ServerAdministrationInterfaceApplication"))
 

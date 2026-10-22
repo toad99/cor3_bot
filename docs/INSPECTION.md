@@ -295,6 +295,11 @@ v1.25.71 ✅ (relevé `ws_dump` du 21/10 à 23:44) :
     Ajout d'IP ✅ (22/10, 3 IP Injection réussies). Lignes : icône + IP, durée, **un bouton poubelle sans
     icône nommée** (rouge) : le bot prend le plus grand bloc autour de l'IP qui ne contient qu'un bouton.
   - Bouton d'envoi de FICHIERS : l'icône est nommée en `data-sentry-element="UploadIcon"` (pas `-component`).
+  - Data Upload (22/10, 04:47) : le bouton ouvre « Sélectionner un fichier à envoyer », déjà sur
+    `./Bureau/Downloads` (`FilePickerBreadcrumbs`) ; fichiers `[data-component-name="FilePickerItem"]`, nom choisi
+    dans `FilePickerFileName`, bouton « Envoyer » `FilePickerAttachButton`, croix `FilePickerCloseButton`.
+    **Sans le clic sur Envoyer, la fenêtre reste ouverte devant tout** (tous les clics suivants échouent) :
+    le bot la referme toujours. Trame de réponse à l'envoi pas encore relevée ❓.
   - Decrypt & Extract : après l'ICE WALL réussi, `desktop:update.file` arrive avec l'id du fichier téléchargé,
     pas l'id « j_… » du job : le bot accepte alors n'importe quel `update.file`.
   - Le raccourci Downloads du bureau peut être caché par une fenêtre : double-clic DOM en secours.
