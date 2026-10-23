@@ -25,7 +25,8 @@ Le joueur indique que les CM du Discord officiel autorisent l'automatisation. To
   lire l'état caché Colyseus pour ICE WALL (résoudre avec les glyphes visibles).
 - **Une seule session par compte** : ouvrir cor3.gg ailleurs déconnecte le joueur. En inspection en direct,
   lui demander d'abord.
-- Le mode `--auto` n'engage jamais de mercenaire ; il ne prend pas la session si le PC est utilisé.
+- Le mode `--auto` n'engage jamais de mercenaire. Depuis le 24/10, à la demande du joueur, il passe même si le PC
+  est utilisé (`skip_if_user_active_min = 0` dans sa config) : il peut donc le déconnecter s'il joue à ce moment-là.
 
 ## Carte du code
 
@@ -41,6 +42,8 @@ Le joueur indique que les CM du Discord officiel autorisent l'automatisation. To
   (faux serveur WebSocket qui renvoie en msgpack ce que la page envoie en JSON).
 - `tools/ws_tap.js` (console du navigateur) et `tools/ws_dump.py` (enregistreur Playwright) : inspection.
 - `install_task.ps1`, `run_cor3.bat` : Planificateur de tâches Windows (UTF-8 avec BOM, fins de ligne CRLF).
+- `install_linux.sh`, `run_cor3.sh`, `tools/login_vps.sh` : VPS Debian (Chrome sous `xvfb-run`, minuteurs
+  systemd en heure de Paris, connexion du joueur par VNC dans un tunnel SSH). Éprouvé dans un conteneur Debian 12.
 
 ## Commandes
 

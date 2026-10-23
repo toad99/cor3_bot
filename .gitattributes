@@ -6,3 +6,4 @@
 *.toml text eol=lf
 *.html text eol=lf
 *.js text eol=lf
+*.sh text eol=lf

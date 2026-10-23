@@ -117,6 +117,29 @@ Repères horaires : la daily se réinitialise à 00:00 UTC, soit 02:00 à Paris 
 heure d'hiver. À 2 h 15 la nouvelle daily est donc toujours disponible. La nuit du passage à l'heure
 d'été (2 h 15 n'existe pas), la tâche part à 3 h grâce à « dès que possible ».
 
+## Sur un serveur Linux (VPS Debian / Ubuntu)
+
+Le bot tourne aussi sur un VPS allumé jour et nuit : Google Chrome (Chromium sur processeur ARM), dans un écran
+virtuel (`xvfb-run`), lancé par des minuteurs systemd aux mêmes heures que sous Windows (heure de Paris).
+Il faut environ 1 à 2 Go de mémoire libre.
+
+1. Copier le projet : `git clone git@github.com:toad99/cor3_bot.git && cd cor3_bot`, puis y mettre ton
+   `config.toml` du PC, avec `profile_dir = ""` dans `[general]` (le chemin `C:/...` ne marche pas sous Linux).
+2. `sh install_linux.sh` : paquets (Python, Xvfb, x11vnc), environnement Python, Chrome, minuteurs
+   `cor3_bot.timer` (02:15) et `cor3_bot_auto.timer` (00:05 puis tous les quarts d'heure).
+3. **Se connecter une fois** à cor3.gg dans le profil du bot : `sh tools/login_vps.sh` sur le VPS. Depuis ton PC,
+   `ssh -L 5901:localhost:5901 utilisateur@vps`, puis un client VNC (TigerVNC, RealVNC Viewer) sur
+   `localhost:5901` ; connecte-toi dans la fenêtre Chrome, puis ferme-la. Le VNC n'écoute que sur le VPS
+   lui-même (passage par le tunnel SSH), et les minuteurs sont en pause pendant ce temps.
+   Copier `chrome-profile` depuis Windows ne marche pas : Chrome y chiffre ses données avec Windows.
+4. Essai : `./run_cor3.sh --dry-run`. Journal dans `logs/`, minuteurs : `systemctl list-timers 'cor3_bot*'`,
+   sortie d'un passage : `journalctl -u cor3_bot_auto -n 50`.
+5. **Arrêter les tâches Windows** (`Unregister-ScheduledTask cor3_bot, cor3_bot_auto` ou taskschd.msc) :
+   deux bots sur le même compte se volent la session.
+
+Retirer les minuteurs : `sh install_linux.sh --remove`. Pas de notification Windows sur un VPS : utilise
+Discord ou ntfy (`[notify]`). Sous Linux, `--auto` ne regarde pas l'activité du PC.
+
 ## Alertes et journal
 
 - Journal du jour : `logs\cor3_AAAA-MM-JJ.log` ; historique d'une ligne par exécution : `logs\history.jsonl`.

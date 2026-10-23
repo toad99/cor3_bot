@@ -377,6 +377,17 @@ v1.25.71 ✅ (relevé `ws_dump` du 21/10 à 23:44) :
   hack t4) ; boutons Appliquer / Actif (désactivé) / Écraser / Renommer / Supprimer ; compteur « 5/10 ». Les
   lignes s'affichent après la fenêtre : attendre la première. Si le bot échoue au milieu, il referme la
   fenêtre, **rallume le Loadout** et quitte l'écran (sinon il restait éteint et bloquait la suite du passage).
+- **Puissance des logiciels** ✅ (24/10, `ws_dump` pendant que le joueur changeait de composants, 8 mesures, toutes
+  exactes) : chaque trame `loadout` (`get.options`, `equip.hardware`, `equip.software`, `unequip.software`,
+  `apply.preset`) porte `resources = {supply, demand, canBoot, softwarePower[{moduleId, ratio, abilities[{type,
+  computedPower}]}]}`. Calcul : pour chaque ressource de `consuming` (cpu_frequency, cpu_cores, gpu_power,
+  gpu_memory, ram_frequency, ram_memory), `base` = 1re valeur s'il y en a 2, valeur du milieu s'il y en a 3 (c'est
+  la `demand` affichée), `top` = dernière ; part = (offre − base) / (top − base), bornée à [0, 1] ;
+  `ratio` = la plus petite part (le composant le plus faible) ; puissance = plancher(min + (max − min) × ratio).
+  Ex. Cypher+ [8, 25] avec UNO 12,7 GHz : (12,7 − 5) / 9,4 = 0,819 → 21 ; avec I-Partner : 4 cœurs pour [1, 2, 6] →
+  0,5 → 16. A/Bver 410 : GPU 1,03 pour [0,4 ; 0,85 ; 1,19] → 0,529 → HACK 19, SEARCH 14.
+  `demand.psu_total` = consommation CPU + GPU (2,95 = 0,8 + 2,15). `canBoot` vu vrai jusqu'à 3,0 pour un PSU de 3 ;
+  au-delà ❓ (supposé : ne démarre pas).
 - **Le jeu se rouvre sur le dernier écran** (22/10, 03:45) : après un passage interrompu dans le Loadout, la page
   s'ouvre sur `LoadoutHeader` sans dock. `open_game` attend le dock **ou** le Loadout, rallume et fait « Retour ».
 
