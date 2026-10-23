@@ -2,7 +2,7 @@
 
 Bot Python + Playwright qui fait la routine quotidienne du joueur sur **cor3.gg** (ARG « Fragmentary Order ») : daily,
 jobs des 4 marchés, minuteurs des marchés, mercenaires. Il tourne sur son PC Windows, dans un **profil Chrome
-dédié**, lancé par le Planificateur de tâches (02:15 heure de Paris + passage horaire `--auto`).
+dédié**, lancé par le Planificateur de tâches (02:15 heure de Paris + passage `--auto` tous les quarts d'heure).
 Le joueur indique que les CM du Discord officiel autorisent l'automatisation. Tout le projet est en français
 (code, journaux, docs) : garder cette langue.
 
@@ -49,7 +49,7 @@ python -m pytest tests -q                 # tous les tests (≈ 5 min, Chromium 
 python -m pyflakes cor3_bot.py solvers.py tests tools
 python cor3_bot.py --dry-run              # sur le PC du joueur : tout lire et résoudre, ne rien valider
 python cor3_bot.py --only jobs --dry-run
-python cor3_bot.py --auto                 # ce que fait la tâche horaire
+python cor3_bot.py --auto                 # ce que fait la tâche du quart d'heure
 ```
 
 ## Conventions
@@ -91,3 +91,7 @@ python cor3_bot.py --auto                 # ce que fait la tâche horaire
   Integrity, les 9 types de jobs (Log/Data Download, File Decryption, Decrypt & Extract, Data Upload, Log Deletion,
   File Elimination, IP Cleanup, IP Injection), ICE WALL de déchiffrement. Jobs perdus d'avance détectés
   (`Hopeless` : fichier trop chiffré, serveur trop défendu). `--bilan` : gains par jour.
+- Objectif du joueur (23/10) : le rang **Pillar** (quête Wings of Mars et événement Echoes of Planetside faits,
+  Renommée 20, total de crédits gagnés). **La Renommée compte plus que les CR** : chaque job terminé rapporte
+  3 points, quel que soit son gain (relevé sur le bandeau `LevelIndicator`, § 2). Viser le nombre de jobs réussis.
+  Le bot lit la Renommée à chaque passage (`note_renown`, `--bilan`), et `--auto` tourne tous les quarts d'heure.

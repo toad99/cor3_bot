@@ -6,7 +6,7 @@ Commandes (depuis le dossier du script, venv activé) :
   python cor3_bot.py                  exécution normale (daily, jobs, mercenaires selon config.toml)
   python cor3_bot.py --dry-run        simulation : lit et résout tout, mais ne valide rien
   python cor3_bot.py --only daily     une seule partie : daily, jobs, markets ou mercs (répétable)
-  python cor3_bot.py --auto           passage horaire : ne fait que ce qui est dû (state.json)
+  python cor3_bot.py --auto           passage du quart d'heure : ne fait que ce qui est dû (state.json)
   python cor3_bot.py --test-notify    envoie une alerte de test
 
 Codes de sortie : 0 = tout OK, 1 = au moins une étape en échec, 2 = config/connexion/session.
@@ -53,8 +53,7 @@ HOME_SERVER = "Home Server"
 # on rouvre l'onglet Contrats de ce marché : c'est ce que fait le bot.
 DEFAULT_MARKETS = [HOME_SERVER, "D4RK RM7MI", "SRM7-M", "URM7-M"]
 ACTIVE_EXPEDITION = {"PREPARING", "RUNNING", "EVENT", "RETURNING"}
-# Job signé en échec : repris au passage horaire suivant (hh:45). 15 min suffit pour qu'un échec du
-# passage de 02:15 soit repris à 02:45 (avec 30 min, un échec à 02:15:34 attendait 03:45).
+# Job signé en échec : repris 15 min plus tard, au passage --auto suivant (tous les quarts d'heure).
 JOB_RETRY = dt.timedelta(minutes=15)
 ICE_JOB_TYPES = {"DecryptFile", "DecryptDownloadedFile"}     # passent par le mini-jeu ICE WALL
 
@@ -89,6 +88,19 @@ SAI_LOGIN = comp("SaiLogin")
 
 def rx(pattern: str) -> re.Pattern:
     return re.compile(pattern, re.I)
+
+
+# Bandeau du bureau : « 17.119 RENOMMÉE » puis « [107/900] » (niveau, points dans le palier, taille du palier).
+RENOWN = re.compile(r"(\d+)(?:[.,]\d+)?\s*(?:RENOMMÉE|RENOWN)\s*\[\s*(\d+)\s*/\s*(\d+)\s*\]", re.I)
+
+
+def renown_gain(before: tuple[int, int, int], after: tuple[int, int, int]) -> int | None:
+    """Points gagnés entre deux lectures (niveau, points, palier) ; None si on a sauté un palier inconnu."""
+    if after[0] == before[0]:
+        return max(after[1] - before[1], 0)
+    if after[0] == before[0] + 1:
+        return before[2] - before[1] + after[1]
+    return None
 
 
 # Libellés FR | EN (le bureau suit la langue choisie, les mini-jeux restent en anglais).
@@ -652,6 +664,7 @@ class Bot:
         self._market_name: str | None = None
         self._original_endpoint: str | None = None
         self._current_preset: str | None = None
+        self._renown: tuple[int, int, int] | None = None
 
     # ----- outils génériques -------------------------------------------------
     def check_session(self) -> None:
@@ -775,6 +788,27 @@ class Bot:
             self.pause(1500)
         self.button(self.page, "back").click()
         self.pause(1200)
+
+    def renown(self) -> tuple[int, int, int] | None:
+        """Bandeau de Renommée du bureau (« 17.119 RENOMMÉE [107/900] ») : (niveau, points, points du palier)."""
+        loc = self.page.locator(cname("LevelIndicatorTop"))
+        for i in range(loc.count()):
+            if m := RENOWN.search(loc.nth(i).text_content() or ""):
+                return int(m.group(1)), int(m.group(2)), int(m.group(3))
+        return None
+
+    def note_renown(self, moment: str) -> None:
+        """Journalise la Renommée (lue par --bilan) et ce qu'elle a gagné depuis la lecture précédente."""
+        try:
+            now = self.renown()
+        except PWError:
+            now = None
+        if now is None:
+            self.log.debug("Renommée illisible (%s) : bandeau LevelIndicator absent", moment)
+            return
+        gain = renown_gain(self._renown, now) if self._renown else None
+        self._renown = now
+        self.log.info("Renommée : niveau %d, %d/%d (%s%s)", *now, moment, f", +{gain}" if gain else "")
 
     def ensure_connected(self) -> None:
         self.check_session()
@@ -2395,45 +2429,70 @@ def warn_daily_if_late(cfg: dict, state: State, notifier: Notifier, why: str, no
 JOB_DONE = re.compile(r"^(\d{4}-\d\d-\d\d) \S+ +INFO +Job terminé : (.+?) sur .+? \(\+(\d+) CR, \+(\d+) REP\)")
 JOB_LOST = re.compile(r"^(\d{4}-\d\d-\d\d) .*job perdu")
 BALANCE = re.compile(r"^(\d{4}-\d\d-\d\d \S+) +INFO +Solde : (\d+) CR")
+RENOWN_LINE = re.compile(r"^((\d{4}-\d\d-\d\d) \S+) +INFO +Renommée : niveau (\d+), (\d+)/(\d+) \((?:après )?([^,)]+)")
+PILLAR_LEVEL = 20       # rang Pillar : Renommée 20 (avec la quête, l'événement et le total de crédits)
 
 
 def bilan(log_dir: Path, today: dt.date | None = None, days: int = 7) -> str:
-    """Gains par jour (heure locale), lus dans les journaux : jobs terminés, CR, REP, jobs perdus, dernier solde."""
+    """Gains par jour (heure locale), lus dans les journaux : jobs terminés, CR, REP, Renommée, jobs perdus,
+    dernier solde, et d'où vient la Renommée (jobs, daily, mercs, ou hors du bot entre deux passages)."""
     today = today or dt.date.today()
+    first_day = (today - dt.timedelta(days=days - 1)).isoformat()
     per_day: dict[str, dict] = {}
     types: dict[str, int] = {}
+    sources: dict[str, int] = {}
     balance = None
+    renown: list[tuple[dt.datetime, tuple[int, int, int]]] = []
+
+    def day_of(d: str) -> dict:
+        return per_day.setdefault(d, {"jobs": 0, "cr": 0, "rep": 0, "lost": 0, "renown": None})
+
     for path in sorted(log_dir.glob("cor3_*.log")):
         lost_seen: set[str] = set()
         for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
             if m := JOB_DONE.match(line):
-                day = per_day.setdefault(m.group(1), {"jobs": 0, "cr": 0, "rep": 0, "lost": 0})
+                day = day_of(m.group(1))
                 day["jobs"] += 1
                 day["cr"] += int(m.group(3))
                 day["rep"] += int(m.group(4))
-                if m.group(1) >= (today - dt.timedelta(days=days - 1)).isoformat():
+                if m.group(1) >= first_day:
                     types[m.group(2)] = types.get(m.group(2), 0) + 1
             elif (m := JOB_LOST.match(line)) and "WARNING" in line:
                 key = line.split("en échec")[0][20:]            # un même job revient dans le résumé : une fois
                 if key not in lost_seen:
                     lost_seen.add(key)
-                    per_day.setdefault(m.group(1), {"jobs": 0, "cr": 0, "rep": 0, "lost": 0})["lost"] += 1
+                    day_of(m.group(1))["lost"] += 1
             elif m := BALANCE.match(line):
                 balance = (m.group(1), int(m.group(2)))
+            elif m := RENOWN_LINE.match(line):
+                now = (int(m.group(3)), int(m.group(4)), int(m.group(5)))
+                day = day_of(m.group(2))
+                day["renown"] = day["renown"] or 0
+                if renown and (gain := renown_gain(renown[-1][1], now)):
+                    day["renown"] += gain
+                    if m.group(2) >= first_day:
+                        source = "hors du bot" if m.group(6) == "ouverture" else m.group(6)
+                        sources[source] = sources.get(source, 0) + gain
+                renown.append((dt.datetime.fromisoformat(m.group(1)), now))
+
     def num(n: int, width: int) -> str:
         return f"{n:,}".replace(",", " ").rjust(width)
 
     def row(label: str, day: dict) -> str:
         lost = f"  ({day['lost']} perdu(s))" if day["lost"] else ""
-        return f"  {label:<12} {day['jobs']:>3} jobs  {num(day['cr'], 8)} CR  {num(day['rep'], 7)} REP{lost}"
+        ren = "-" if day["renown"] is None else num(day["renown"], 0)
+        return (f"  {label:<12} {day['jobs']:>3} jobs  {num(day['cr'], 8)} CR  {num(day['rep'], 7)} REP"
+                f"  {ren:>5} Renommée{lost}")
 
     out = ["Bilan des jobs (d'après logs/cor3_*.log)", ""]
-    week = {"jobs": 0, "cr": 0, "rep": 0, "lost": 0}
+    week = {"jobs": 0, "cr": 0, "rep": 0, "lost": 0, "renown": None}
     for i in range(days):
         d = (today - dt.timedelta(days=i)).isoformat()
-        day = per_day.get(d, {"jobs": 0, "cr": 0, "rep": 0, "lost": 0})
-        for k in week:
+        day = per_day.get(d, {"jobs": 0, "cr": 0, "rep": 0, "lost": 0, "renown": None})
+        for k in ("jobs", "cr", "rep", "lost"):
             week[k] += day[k]
+        if day["renown"] is not None:
+            week["renown"] = (week["renown"] or 0) + day["renown"]
         out.append(row("aujourd'hui" if i == 0 else "hier" if i == 1 else d, day))
     out.append(row(f"{days} jours", week))
     if types:
@@ -2441,6 +2500,25 @@ def bilan(log_dir: Path, today: dt.date | None = None, days: int = 7) -> str:
                 + ", ".join(f"{k} {v}" for k, v in sorted(types.items(), key=lambda kv: -kv[1]))]
     out += ["", f"  Dernier solde vu : {num(balance[1], 0)} CR le {balance[0]}" if balance
             else "  Dernier solde vu : pas encore relevé (au prochain passage)"]
+    if not renown:
+        out.append("  Renommée : pas encore relevée (au prochain passage)")
+        return "\n".join(out)
+    when, (level, points, step) = renown[-1]
+    out.append(f"  Renommée : niveau {level}, {points}/{step} le {when:%Y-%m-%d %H:%M}")
+    if sources:
+        out.append(f"  Renommée gagnée ({days} jours) : "
+                   + ", ".join(f"{k} +{v}" for k, v in sorted(sources.items(), key=lambda kv: -kv[1])))
+    if level < PILLAR_LEVEL:
+        # Hypothèse (paliers vus : 800 au niveau 16, 900 au 17) : chaque palier grandit de 100.
+        left = step - points + sum(step + 100 * k for k in range(1, PILLAR_LEVEL - level))
+        line = f"  Niveau {PILLAR_LEVEL} : encore ≈ {num(left, 0)} points (si chaque palier grandit de 100)"
+        recent = [r for r in renown if r[0].date().isoformat() >= first_day]
+        elapsed = (when - recent[0][0]).total_seconds() / 86400 if recent else 0
+        gained = sum(renown_gain(a, b) or 0 for (_, a), (_, b) in zip(recent, recent[1:]))
+        if elapsed >= 0.5 and gained:
+            rate = gained / elapsed
+            line += f", soit ≈ {left / rate:.0f} jours à {rate:.0f} points par jour"
+        out.append(line)
     return "\n".join(out)
 
 
@@ -2451,10 +2529,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dry-run", action="store_true", help="simulation : aucune validation")
     ap.add_argument("--only", action="append", choices=list(SECTION), help="limiter à une partie")
     ap.add_argument("--auto", action="store_true",
-                    help="passage horaire : ne lance le navigateur que si quelque chose est dû")
+                    help="passage du quart d'heure : ne lance le navigateur que si quelque chose est dû")
     ap.add_argument("--headless", action="store_true", help="navigateur invisible")
     ap.add_argument("--test-notify", action="store_true", help="tester les alertes")
-    ap.add_argument("--bilan", action="store_true", help="gains par jour (CR, REP), sans ouvrir Chrome")
+    ap.add_argument("--bilan", action="store_true", help="gains par jour (CR, REP, Renommée), sans ouvrir Chrome")
     ap.add_argument("--url", default=None, help=argparse.SUPPRESS)      # maquette de test
     args = ap.parse_args(argv)
     if args.url:
@@ -2541,6 +2619,7 @@ def main(argv: list[str] | None = None) -> int:
             bot.auto_mode = args.auto
             try:
                 bot.open_game()
+                bot.note_renown("ouverture")
                 for part in parts:
                     try:
                         results[part] = ("OK", getattr(bot, f"run_{part}")())
@@ -2556,6 +2635,7 @@ def main(argv: list[str] | None = None) -> int:
                             bot.close_all_windows()
                         except Exception:
                             pass
+                    bot.note_renown(f"après {part}")
             except (SessionLost, LoginRequired) as exc:
                 exit_code = 2
                 results["session"] = ("ÉCHEC", str(exc))

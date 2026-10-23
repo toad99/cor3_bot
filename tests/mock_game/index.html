@@ -16,7 +16,8 @@
 </style>
 </head>
 <body>
-<div id="top">Terminal local : <span id="term">SB-152 CORP</span></div>
+<div id="top">Terminal local : <span id="term">SB-152 CORP</span>
+  <div data-component-name="LevelIndicator" data-sentry-component="LevelIndicator"><div data-component-name="LevelIndicatorTop"><span id="renown-level">17.119 RENOMMÉE</span><span>[<span id="renown-progress">107</span><b>/900</b>]</span></div></div></div>
 <div id="dock">
   <div data-onboarding-300-id="TabBarItem-019a0c41-b17f-7abc-1234-567890abcde2" onclick="openGameCenter()">GAME CENTER</div>
   <div data-onboarding-300-id="TabBarItem-NETWORK_MAP" onclick="openMap()">MAP</div>
@@ -427,11 +428,19 @@ function signJob(marketId, jobId) {
   emitJobs(marketId);                 // v1.25.71 : le jeu recharge lui-même la liste après une signature
   renderJobs(marketId);
 }
+function addRenown(points) {
+  const prog = document.getElementById('renown-progress'), lvl = document.getElementById('renown-level');
+  let level = parseInt(lvl.textContent), p = parseInt(prog.textContent) + points;
+  if (p >= 900) { level++; p -= 900; }
+  prog.textContent = p;
+  lvl.textContent = `${(level + p / 900).toFixed(3)} RENOMMÉE`;
+}
 function completeJob(marketId, jobId) {
   const j = JOBS[marketId].find(x => x.id === jobId);
   document.querySelectorAll('[data-component-name=JobSideout]').forEach(x => x.remove());
   if (!j.canComplete) { window.__mock.mismatches++; emit('market', 'job.complete', {status: 'error'}); return; }
   j.status = 'COMPLETED'; window.__mock.completed.push(jobId);
+  addRenown(3);                       // relevé le 23/10 : 3 points de Renommée par job terminé
   emit('market', 'job.complete', {status: 'ok'});
   renderJobs(marketId);
 }

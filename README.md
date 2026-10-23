@@ -91,15 +91,19 @@ Deux tâches sont créées :
 | Tâche | Quand | Ce qu'elle fait |
 |---|---|---|
 | `cor3_bot` | tous les jours à 02:15 (heure de Windows), réveille le PC, rattrape l'heure manquée | passage complet : daily, 4 marchés + jobs, minuteurs, mercenaires |
-| `cor3_bot_auto` | toutes les heures à hh:45 | ne lance Chrome que si quelque chose est dû : daily pas faite, minuteur de marché échu, expédition en cours ; ne fait rien si tu as utilisé le PC dans les 10 dernières minutes (pour ne pas te voler la session) |
+| `cor3_bot_auto` | tous les quarts d'heure (hh:05, 20, 35, 50) | ne lance Chrome que si quelque chose est dû : daily pas faite, minuteur de marché échu, expédition en cours ; ne fait rien si tu as utilisé le PC dans les 10 dernières minutes (pour ne pas te voler la session) |
 
-Sans la tâche horaire : `.\install_task.ps1 -NoAuto`. Réglages de `--auto` dans `[auto]` (heures autorisées,
+Chaque minuteur de marché ne repart que quand le bot ouvre le marché : le prendre dans le quart d'heure
+au lieu de l'heure laisse passer plus de listes de contrats, donc plus de jobs (et de Renommée).
+Après un `git pull` qui change `install_task.ps1`, relance-le pour mettre la tâche à jour.
+
+Sans la tâche `--auto` : `.\install_task.ps1 -NoAuto`. Réglages de `--auto` dans `[auto]` (heures autorisées,
 inactivité, alerte si la daily n'est pas faite 3 h avant le reset).
 
 À la main (taskschd.msc → Créer une tâche), pour `cor3_bot` :
 - Général : « N'exécuter que si l'utilisateur est connecté » (nécessaire pour Chrome et les notifications).
-- Déclencheurs : Quotidien, 02:15:00 (pour `cor3_bot_auto` : Quotidien 00:45, répéter toutes les heures pendant 23 h).
-- Actions : Démarrer un programme → `C:\cor3_bot\run_cor3.bat` (argument `--auto` pour la tâche horaire),
+- Déclencheurs : Quotidien, 02:15:00 (pour `cor3_bot_auto` : Quotidien 00:05, répéter toutes les 15 minutes pendant 23 h 46).
+- Actions : Démarrer un programme → `C:\cor3_bot\run_cor3.bat` (argument `--auto` pour `cor3_bot_auto`),
   « Commencer dans » → `C:\cor3_bot`.
 - Conditions : cocher « Sortir l'ordinateur du mode veille pour exécuter cette tâche ».
 - Paramètres : « Exécuter la tâche dès que possible si un démarrage planifié est manqué »,
@@ -115,8 +119,11 @@ d'été (2 h 15 n'existe pas), la tâche part à 3 h grâce à « dès que possi
 ## Alertes et journal
 
 - Journal du jour : `logs\cor3_AAAA-MM-JJ.log` ; historique d'une ligne par exécution : `logs\history.jsonl`.
-- **Gains par jour** : `python cor3_bot.py --bilan` (sans ouvrir Chrome) affiche les jobs terminés, CR et REP
-  d'aujourd'hui, d'hier et des 7 derniers jours, les jobs perdus, la répartition par type et le dernier solde vu.
+- **Gains par jour** : `python cor3_bot.py --bilan` (sans ouvrir Chrome) affiche les jobs terminés, CR, REP et
+  Renommée d'aujourd'hui, d'hier et des 7 derniers jours, les jobs perdus, la répartition par type, le dernier
+  solde vu, d'où vient la Renommée (jobs, daily, mercs, ou « hors du bot » entre deux passages) et le temps
+  estimé jusqu'au niveau 20 (rang Pillar). La Renommée est lue sur le bandeau du bureau à l'ouverture et après
+  chaque partie (`Renommée : niveau 17, 107/900` dans le journal).
 - État entre deux passages : `state.json` (daily faite, échéance de chaque marché, jobs signés à reprendre,
   expédition en cours).
   Le supprimer ne casse rien : le prochain passage revisite tout.

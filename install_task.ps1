@@ -2,7 +2,7 @@
 #   powershell -ExecutionPolicy Bypass -File .\install_task.ps1
 #  - « cor3_bot »      : passage complet tous les jours à 02:15 (heure de Windows, donc Paris) ;
 #                        réveille le PC si besoin.
-#  - « cor3_bot_auto » : toutes les heures à hh:45 ; ne lance Chrome que si quelque chose est dû
+#  - « cor3_bot_auto » : tous les quarts d'heure (hh:05, 20, 35, 50) ; ne lance Chrome que si quelque chose est dû
 #                        (daily pas faite, minuteur de marché échu, expédition en cours).
 #                        Pour ne pas la créer : ajoute -NoAuto à la commande ci-dessus.
 param([switch]$NoAuto)
@@ -25,16 +25,17 @@ Write-Host "Tâche « cor3_bot » créée : tous les jours à 02:15."
 
 if (-not $NoAuto) {
     $autoAction = New-ScheduledTaskAction -Execute $bat -Argument "--auto" -WorkingDirectory $dir
-    # Déclencheur quotidien répété toutes les heures pendant 23 h : 00:45, 01:45 ... 23:45
-    $autoTrigger = New-ScheduledTaskTrigger -Daily -At "00:45"
-    $autoTrigger.Repetition = (New-ScheduledTaskTrigger -Once -At "00:45" `
-        -RepetitionInterval (New-TimeSpan -Hours 1) -RepetitionDuration (New-TimeSpan -Hours 23)).Repetition
+    # Déclencheur quotidien répété tous les quarts d'heure : 00:05, 00:20 ... 23:50 (jamais 02:15, l'heure du
+    # passage complet). Chaque minuteur de marché repart quand on l'ouvre : le prendre au plus tôt = plus de jobs.
+    $autoTrigger = New-ScheduledTaskTrigger -Daily -At "00:05"
+    $autoTrigger.Repetition = (New-ScheduledTaskTrigger -Once -At "00:05" `
+        -RepetitionInterval (New-TimeSpan -Minutes 15) -RepetitionDuration (New-TimeSpan -Hours 23 -Minutes 46)).Repetition
     $autoSettings = New-ScheduledTaskSettingsSet `
         -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
         -ExecutionTimeLimit (New-TimeSpan -Hours 1) `
         -MultipleInstances IgnoreNew
     Register-ScheduledTask -TaskName "cor3_bot_auto" -Action $autoAction -Trigger $autoTrigger -Settings $autoSettings `
-        -Principal $principal -Description "cor3.gg : passage horaire, seulement si quelque chose est dû" -Force | Out-Null
-    Write-Host "Tâche « cor3_bot_auto » créée : toutes les heures à hh:45."
+        -Principal $principal -Description "cor3.gg : passage tous les quarts d'heure, seulement si quelque chose est dû" -Force | Out-Null
+    Write-Host "Tâche « cor3_bot_auto » créée : tous les quarts d'heure (hh:05, 20, 35, 50)."
 }
 Write-Host "Test immédiat : Start-ScheduledTask -TaskName cor3_bot"

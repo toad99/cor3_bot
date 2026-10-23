@@ -203,7 +203,34 @@ def test_bilan_reads_the_daily_logs(tmp_path):
     (tmp_path / "cor3_2026-10-23.log").write_text(
         "2026-10-23 02:16:00 INFO    Job terminé : IP Cleanup sur Home Server (+1274 CR, +230 REP)\n", encoding="utf-8")
     text = cor3_bot.bilan(tmp_path, today=dt.date(2026, 10, 23))
-    assert "aujourd'hui    1 jobs     1 274 CR      230 REP" in text
-    assert "hier           2 jobs     2 283 CR      412 REP  (1 perdu(s))" in text
-    assert "7 jours        3 jobs     3 557 CR      642 REP  (1 perdu(s))" in text
+    assert "aujourd'hui    1 jobs     1 274 CR      230 REP      - Renommée" in text
+    assert "hier           2 jobs     2 283 CR      412 REP      - Renommée  (1 perdu(s))" in text
+    assert "7 jours        3 jobs     3 557 CR      642 REP      - Renommée  (1 perdu(s))" in text
     assert "Dernier solde vu : 39 540 CR le 2026-10-22 05:00:00" in text
+    assert "Renommée : pas encore relevée" in text
+
+
+def test_bilan_follows_the_renown(tmp_path):
+    """Renommée lue à l'ouverture et après chaque partie : gains par jour, par source, et niveau 20 estimé."""
+    (tmp_path / "cor3_2026-10-22.log").write_text("\n".join([
+        "2026-10-22 02:15:10 INFO    Renommée : niveau 16, 694/800 (ouverture)",
+        "2026-10-22 02:15:30 INFO    Renommée : niveau 16, 694/800 (après daily)",
+        "2026-10-22 05:20:00 INFO    Renommée : niveau 16, 790/800 (après jobs, +96)",
+        "2026-10-22 11:45:00 INFO    Renommée : niveau 16, 795/800 (ouverture, +5)"]), encoding="utf-8")
+    (tmp_path / "cor3_2026-10-23.log").write_text("\n".join([
+        "2026-10-23 02:15:00 INFO    Renommée : niveau 17, 50/900 (après jobs, +55)",
+        "2026-10-23 02:16:00 INFO    Renommée : niveau 17, 56/900 (après mercs, +6)"]), encoding="utf-8")
+    text = cor3_bot.bilan(tmp_path, today=dt.date(2026, 10, 23))
+    assert "aujourd'hui    0 jobs         0 CR        0 REP     61 Renommée" in text
+    assert "hier           0 jobs         0 CR        0 REP    101 Renommée" in text
+    assert "7 jours        0 jobs         0 CR        0 REP    162 Renommée" in text
+    assert "Renommée : niveau 17, 56/900 le 2026-10-23 02:16" in text
+    assert "Renommée gagnée (7 jours) : jobs +151, mercs +6, hors du bot +5" in text
+    # 844 pour finir le 17, puis 1 000 et 1 100 : 2 944 ; 162 points en un jour
+    assert "Niveau 20 : encore ≈ 2 944 points (si chaque palier grandit de 100), soit ≈ 18 jours" in text
+
+
+def test_renown_gain_across_a_level():
+    assert cor3_bot.renown_gain((17, 100, 900), (17, 133, 900)) == 33
+    assert cor3_bot.renown_gain((16, 769, 800), (17, 5, 900)) == 36
+    assert cor3_bot.renown_gain((16, 769, 800), (18, 5, 1000)) is None

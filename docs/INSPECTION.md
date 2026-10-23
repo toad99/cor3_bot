@@ -50,8 +50,17 @@ dans un `<canvas>` ; le son n'apporte rien (le Signal Decode joue un bruit de cl
 | Fermer une fenêtre | `[data-component-name="close-app-btn"]` |
 | Raccourci du bureau | `[data-sentry-component="DesktopShortcutComponent"]` (ex. « Downloads ») |
 | Barre « Terminal local » | texte `Terminal local` ; `DÉCONNECTÉ` = session perdue |
+| Renommée | `[data-component-name="LevelIndicatorTop"]` : « 17.119 RENOMMÉE » puis « [107/900] » |
 
 Le bureau suit la langue choisie (FR) ; **les mini-jeux restent en anglais**. Le bot accepte les deux (table `TXT`).
+
+**Renommée** ✅ (v1.25.71, relevé dans 40 captures du 22–23/10) : bandeau `LevelIndicator` du bureau,
+`LevelIndicatorTop` = `<span>17.119 RENOMMÉE</span><span>[107<b>/900</b>]</span>` (niveau + points/palier, la
+décimale = la fraction du palier). **Chaque job terminé rapporte 3 points**, quels que soient ses CR et sa REP
+(la REP du job est la réputation auprès du marché) : 4 jobs = +12, 11 jobs = +33, passage du niveau 16 au 17
+à 769/800 + 12 jobs = 5/900. La daily du 23/10 n'a rien donné. Paliers vus : 800 (niveau 16), 900 (niveau 17).
+À découvrir ❓ : ce que rapportent quêtes, expéditions et autres (le bot note la Renommée à l'ouverture et après
+chaque partie, `--bilan` range les gains par source ; « hors du bot » = gagné entre deux passages).
 
 ## 3. WebSocket : salles et actions observées ✅
 

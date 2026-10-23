@@ -348,6 +348,18 @@ def test_job_on_a_server_already_hacked_is_done(make_bot):
     assert m["completed"] == ["job-1"] and m["downloads"] == [24] and m["hackClicks"] == 1 and m["forceHack"] == 0
 
 
+def test_renown_is_read_on_the_desktop(make_bot, caplog):
+    """Bandeau LevelIndicator : niveau et points ; un job terminé en rapporte 3 (relevé le 23/10)."""
+    caplog.set_level(logging.INFO, logger="cor3-test")
+    bot = make_bot(extra="&jobs=1&access=acq&held=RM7-E1L5")
+    assert bot.renown() == (17, 107, 900)
+    bot.note_renown("ouverture")
+    bot.run_jobs()
+    bot.note_renown("après jobs")
+    assert "Renommée : niveau 17, 107/900 (ouverture)" in caplog.text
+    assert "Renommée : niveau 17, 110/900 (après jobs, +3)" in caplog.text
+
+
 def test_job_needing_a_hack_signed_when_allowed(make_bot):
     """sign_without_access = true : on signe quand même, puis on pirate (ici sans mini-jeu)."""
     bot = make_bot(extra="&jobs=1&access=acq", jobs={"sign_without_access": True})
