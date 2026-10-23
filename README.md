@@ -5,7 +5,7 @@ minuteurs des 4 marchés, fait les jobs et suit les expéditions de mercenaires,
 t'alerte en cas d'échec. Il joue **par l'interface** (clics, lecture de la page et du WebSocket du jeu),
 sans appeler l'API à ta place.
 
-Testé contre cor3.gg frontend **v1.25.51** (21/10/2026). Si le jeu change de version, le journal le signale.
+Testé contre cor3.gg frontend **v1.25.71** (22–23/10/2026 : daily, les 9 types de jobs, ICE WALL). Si le jeu change de version, le journal le signale.
 Ce que le bot sait de l'interface : `docs/INSPECTION.md` ; comment l'inspecter à nouveau : `docs/METHODE.md`.
 
 ## Ce que fait chaque partie

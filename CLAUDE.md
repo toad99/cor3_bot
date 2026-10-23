@@ -62,7 +62,7 @@ python cor3_bot.py --auto                 # ce que fait la tâche horaire
   (`state.json`). `StepFailed` = vrai problème : alerte. `Simulated` = arrêt propre du `--dry-run`.
 - Chaque nouvel écran : un morceau de maquette + un test, et une mise à jour de `docs/INSPECTION.md`.
 
-## État au 21/10/2026 (frontend v1.25.51)
+## État au 23/10/2026 (frontend v1.25.71, version testée)
 
 - Vérifié en direct : Signal Decode, System Log Integrity, ICE WALL (déchiffrement), accès par tâche, Log
   Download, signature et fin de job, Loadout/préréglages, ouverture des 4 marchés et leurs minuteurs,
@@ -86,4 +86,8 @@ python cor3_bot.py --auto                 # ce que fait la tâche horaire
 - Stratégie des jobs (accord du joueur le 22/10) : tout ce qui est faisable et rapporte, dépôts, amendes,
   suppressions et IP Injection compris (config du joueur). Ordre sûrs → déchiffrements → piratages, fusible par
   type et par passage, ICE WALL bloqué = arrêt des mini-jeux, retour sur le marché au passage suivant
-  (`run_jobs`, `tests/test_strategy.py`). Decrypt & Extract et Data Upload codés d'après le joueur, jamais vus.
+  (`run_jobs`, `tests/test_strategy.py`).
+- 23/10 : `TESTED_FRONTEND` = v1.25.71. Vérifié en direct dans cette version : Signal Decode et System Log
+  Integrity, les 9 types de jobs (Log/Data Download, File Decryption, Decrypt & Extract, Data Upload, Log Deletion,
+  File Elimination, IP Cleanup, IP Injection), ICE WALL de déchiffrement. Jobs perdus d'avance détectés
+  (`Hopeless` : fichier trop chiffré, serveur trop défendu). `--bilan` : gains par jour.

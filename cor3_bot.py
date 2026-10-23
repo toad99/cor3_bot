@@ -44,7 +44,7 @@ from solvers import (
 
 ROOT = Path(__file__).resolve().parent
 GAME_URL = "https://cor3.gg/"
-TESTED_FRONTEND = "v1.25.51"
+TESTED_FRONTEND = "v1.25.71"
 UTC = dt.timezone.utc
 
 HOME_SERVER = "Home Server"
