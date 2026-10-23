@@ -168,12 +168,13 @@ function openStash() {
   emit('stash', 'get.state', {items: []});
 }
 // &mailview=transfer : relevé en vrai le 23/10 à 09:21, « Tout récupérer » ouvre parfois l'écran de transfert
-// (TransferPanel, « Objets » + « Tout prendre ») au lieu de récupérer tout de suite. Trame de « Tout prendre » non
+// (TransferPanel « Objets », et à côté TransferActions « Tout prendre ») au lieu de récupérer tout de suite. Trame de « Tout prendre » non
 // relevée : la maquette suppose mail:claim.all.
 function claimAll(btn) {
   if (params.get('mailview') === 'transfer') {
-    document.getElementById('stash-page').innerHTML = `<div data-component-name="TransferPanel">
-      <div data-component-name="LootGrid">Objets ${MAIL.length}</div>
+    document.getElementById('stash-page').innerHTML = `<div data-component-name="StashLayoutDesktop">
+      <section data-component-name="TransferPanel">Objets ${MAIL.length}<div data-component-name="LootGrid"></div></section>
+      <section data-component-name="InventoryPanel">Inventaire</section>
       <div data-component-name="TransferActions">
         <button data-component-name="StashButton" onclick="takeAll(this)">Tout prendre</button>
         <button data-component-name="StashButton" data-variant="primary">Vers l'inventaire</button></div></div>`;

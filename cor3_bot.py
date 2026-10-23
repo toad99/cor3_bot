@@ -2605,8 +2605,8 @@ class Bot:
 
     def claim_mail(self) -> str:
         """Stash → Boîte aux lettres → « Tout récupérer » : le butin du drone est gratuit. Selon les fois, le jeu
-        envoie mail:claim.all tout de suite, ou ouvre l'écran de transfert (TransferPanel : « Objets », « Tout
-        prendre ») où il faut encore cliquer « Tout prendre » (relevé le 23/10 à 09:21)."""
+        envoie mail:claim.all tout de suite, ou ouvre l'écran de transfert (TransferPanel « Objets », à côté de
+        TransferActions « Tout prendre ») où il faut encore cliquer « Tout prendre » (relevé le 23/10)."""
         pending = self.events.last("mail", "update.state") or self.events.last("mail", "get.state")
         if pending and isinstance(pending.data, dict) and not pending.data.get("pendingCount"):
             return ""
@@ -2633,7 +2633,7 @@ class Bot:
                 while time.time() < deadline and not self.mail_claimed(mark) and not transfer.count():
                     self.pause(200)
             if transfer.count() and not self.mail_claimed(mark):
-                take = transfer.locator(cname("StashButton")).filter(has_text=rx(TXT["take_all"])).first
+                take = page.locator(cname("TransferActions")).locator(cname("StashButton")).filter(has_text=rx(TXT["take_all"])).first
                 if not take.count():
                     self.snapshot("courrier_transfert")
                     raise StepFailed("écran de transfert du courrier sans « Tout prendre » : écran à relever "
