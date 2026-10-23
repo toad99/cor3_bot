@@ -3,9 +3,10 @@
 
   python tools/ws_dump.py --minutes 10            trames WebSocket décodées -> logs/ws_dump_<date>.jsonl
   python tools/ws_dump.py --rooms market,sai      seulement certaines salles
-  python tools/ws_dump.py --dom                   + inventaire des sélecteurs stables et HTML de l'écran à la fin
-                                                  (logs/dom_<date>.json, logs/dom_<date>.html) :
-                                                  laisse alors la fenêtre ouverte sur l'écran voulu jusqu'au bout
+  python tools/ws_dump.py --dom                   + HTML et sélecteurs stables de l'écran (logs/dom_<date>/) :
+                                                  à chaque trame des salles --snap (drone, expéditions, courrier,
+                                                  stash) et à chacune de tes actions, puis à la fin ;
+                                                  fermer la fenêtre avant la fin ne fait rien perdre
 
 Ouvre cor3.gg dans le profil Chrome dédié du bot (config.toml) : joue normalement dans cette fenêtre,
 puis ferme-la (ou attends la fin du minutage). Rien n'est cliqué à ta place.
@@ -22,6 +23,7 @@ import logging
 import os
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -61,10 +63,18 @@ def scrub(value: Any) -> Any:
     return value
 
 
+SNAP_ROOMS = "drone-missions,expeditions,mail,stash"
+NOISY = {"get.lots", "get.patches", "get.credits", "get.levels"}     # pas de capture d'écran pour celles-ci
+SNAP_EVERY_S = 3
+SNAP_MAX = 300
+
+
 class Recorder(cor3_bot.GameEvents):
-    def __init__(self, log: logging.Logger, out, rooms: set[str]):
+    def __init__(self, log: logging.Logger, out, rooms: set[str], snap_rooms: set[str] | None = None):
         super().__init__(log)
         self.out, self.rooms, self.count = out, rooms, 0
+        self.snap_rooms = snap_rooms or set()
+        self.snap_due: str | None = None        # « salle_action » de la dernière trame qui demande une capture
 
     def _push(self, direction: str, room: str | None, action: str | None, data: Any) -> None:
         super()._push(direction, room, action, data)
@@ -77,6 +87,19 @@ class Recorder(cor3_bot.GameEvents):
         self.out.write(json.dumps(line, ensure_ascii=False, default=str) + "\n")
         self.out.flush()
         self.count += 1
+        player_action = direction == "out" and room == "event"
+        if (room in self.snap_rooms or player_action) and action not in NOISY:
+            self.snap_due = f"{'toi' if player_action else room}_{action}"
+
+
+def snapshot(page, folder: Path, label: str, n: int) -> Path:
+    """HTML (JWT masqués) et inventaire des sélecteurs stables de l'écran du moment."""
+    folder.mkdir(parents=True, exist_ok=True)
+    name = f"{n:03d}_{dt.datetime.now():%H%M%S}_{re.sub(r'[^\w.-]+', '-', label)}"
+    (folder / f"{name}.html").write_text(JWT.sub("<jwt masqué>", page.content()), encoding="utf-8")
+    (folder / f"{name}.json").write_text(json.dumps(page.evaluate(DOM_INVENTORY_JS), ensure_ascii=False, indent=1),
+                                         encoding="utf-8")
+    return folder / f"{name}.html"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -84,7 +107,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--config", default=str(cor3_bot.ROOT / "config.toml"))
     ap.add_argument("--minutes", type=float, default=10)
     ap.add_argument("--rooms", default="", help="salles à garder, ex. market,sai,network-map")
-    ap.add_argument("--dom", action="store_true", help="inventaire des sélecteurs stables à la fin")
+    ap.add_argument("--dom", action="store_true", help="captures de l'écran (HTML + sélecteurs stables)")
+    ap.add_argument("--snap", default=SNAP_ROOMS, help=f"salles qui déclenchent une capture (défaut {SNAP_ROOMS})")
     args = ap.parse_args(argv)
 
     cfg = cor3_bot.load_config(Path(args.config))
@@ -120,21 +144,28 @@ def record(args: argparse.Namespace, gen: dict, log: logging.Logger, log_dir: Pa
                                                     channel=gen.get("channel", "chrome") or None,
                                                     headless=False, viewport={"width": 1600, "height": 900})
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
-        rec = Recorder(log, out, rooms)
+        snap_rooms = {r.strip() for r in args.snap.split(",") if r.strip()} if args.dom else set()
+        rec = Recorder(log, out, rooms, snap_rooms)
         rec.attach(page)
         page.goto(cor3_bot.GAME_URL)
         log.info("Enregistrement dans %s pendant %.0f min : joue, puis ferme la fenêtre.", out_path, args.minutes)
-        try:
-            page.wait_for_event("close", timeout=args.minutes * 60_000)
-        except PWError:
-            pass                                    # minutage écoulé
+        folder, shots, last = log_dir / f"dom_{stamp}", 0, 0.0
+        deadline = time.time() + args.minutes * 60
+        while time.time() < deadline and not page.is_closed():
+            try:
+                page.wait_for_timeout(1000)
+                if rec.snap_due and shots < SNAP_MAX and time.time() - last >= SNAP_EVERY_S:
+                    label, rec.snap_due = rec.snap_due, None
+                    shots += 1
+                    last = time.time()
+                    log.info("Capture d'écran %s", snapshot(page, folder, label, shots).name)
+            except PWError:
+                break                               # fenêtre fermée pendant l'attente ou la capture
         if args.dom and not page.is_closed():
-            dom_path = log_dir / f"dom_{stamp}.json"
-            dom_path.write_text(json.dumps(page.evaluate(DOM_INVENTORY_JS), ensure_ascii=False, indent=1),
-                                encoding="utf-8")
-            html_path = log_dir / f"dom_{stamp}.html"
-            html_path.write_text(JWT.sub("<jwt masqué>", page.content()), encoding="utf-8")
-            log.info("Inventaire des sélecteurs : %s ; HTML de l'écran : %s", dom_path, html_path)
+            try:
+                log.info("Capture finale : %s", snapshot(page, folder, "fin", shots + 1))
+            except PWError:
+                pass
         try:
             ctx.close()
         except PWError:

@@ -196,6 +196,14 @@ v1.25.71 ✅ (relevé `ws_dump` du 21/10 à 23:44) :
   « CORE Market » est celui de Home Server, puis « SOYUZ RM7 Market », « USOL RM7 Market ». L'id est dans
   `market.id` : le contrôle du `marketId` ci-dessus ne s'applique plus.
 
+- **Matériel et logiciels** ✅ (`market:get.lots`, catégories `HARDWARE` et `SOFTWARE`) : `price`, `accessLevel`
+  (niveau de réputation du marché demandé), `unavailableReason`, `details.specs`. Logiciel : `[{type: DECRYPT |
+  HACK | SEARCH, fileTypes | serverTypes, power: [min, max]}]` ; matériel : `cpuFrequency/cpuCores/cpuConsuming`,
+  `gpuPower/gpuMemory/gpuConsuming`, `ramFrequency/ramMemory`, `psuPower/psuProtection`. Le PSU semble borner la
+  consommation CPU + GPU (préréglages du joueur : 0,8 + 2,15 et 1,4 + 1,6 avec un PSU de 3,0).
+  Réputation des marchés le 23/10 (`get.options.reputation`) : CORE 5, USOL 3, SOYUZ 3 (tous trois `isLevelLocked`,
+  bloqués à 1 point du palier), D4RK = « BMI-ZEN Market » 4 (3 184/9 000).
+
 ## 7. Jobs ✅
 
 - Job (`get.jobs.jobs[]`) : `id`, `name`, `jobType`, `corporation`, `relatedServers[{serverName}]`, `deposit`,
@@ -394,11 +402,31 @@ v1.25.71 ✅ (relevé `ws_dump` du 21/10 à 23:44) :
   récupérer sous 24 h.
 - **Renommée** (guide de la communauté, v1.18.80 du 24/04) : **une expédition réussie rapporte +10** (un job : +3,
   confirmé en direct, § 2). Mercenaire ou drone ❓ : à vérifier avec `--bilan` (source « mercs »).
-- **Drone personnel** ❓ (onglet « Drone personnel » des Expéditions, salle `drone-missions` → `get.active` à la
-  connexion) : construit par la quête Wings of Mars (15 étapes, puis une expédition d'essai). D'après le guide, il ne
-  peut pas être détruit pour de bon et il lui faut au moins 1 de durabilité et 1 de batterie pour partir ; butin
-  « Surface of Mars » (jusqu'à 42 447 CR l'objet). Écran, trames, coût, durée et recharge : à relever
-  (`tools/ws_dump.py --dom`).
+- **Drone personnel** (onglet « Drone personnel » des Expéditions) : construit par la quête Wings of Mars. D'après le
+  guide, il ne peut pas être détruit pour de bon ; il faut au moins 1 de durabilité et 1 de batterie pour partir.
+- Trames ✅ (`ws_dump` du 23/10, 04:20–04:44, mission lancée par le joueur) :
+  - `drone-missions:get.options` (à chaque ouverture de l'onglet) = `{drone: {id, name, durability, maxDurability,
+    stealth, payloadGrams, isRepairing, repairSecondsRemaining, isDestroyed, renameCost}, battery: {current, max,
+    restoreSeconds, restorePerHour: 8.33}, repairRate: {creditsPerPoint: 200, secondsPerPoint: 200},
+    activeMissionId, locations[{id, name, baseRisk, missions[{id, name, batteryCost: 30, durationSeconds: 1200}]}]}`.
+    Seul lieu : « The Surface of Mars » (risque de base 25), mission « Surface Exploration ».
+  - Départ : `event:launch {locationConfigId, missionConfigId}` → `drone-missions:launch` (mission RUNNING avec
+    `finalRisk`, `batteryCost` et **tous ses événements d'avance** : `channelEvents[{eventId, type, spawnAtSeconds,
+    message, options[{id, label, effect: {riskDelta, lootDelta}, requiredModuleId}]}]`). Pas de CR dépensés.
+  - Pendant : `drone-missions:event` à l'heure dite. `INFO_DISCOVERY` = information ; `DECISION` et `HAZARD`
+    (`isResolvable: true`) = choix, réponse `event:resolve.event {missionId, eventId, optionId}`. Une option à
+    `requiredModuleId` demande un module du drone.
+  - Fin : `drone-missions:completed {outcome: FULL_SUCCESS | PARTIAL_SUCCESS | FAIL, damageDealt, durabilityAfter,
+    destroyed, loot[{name, quantity}]}`. **Le butin arrive dans le courrier** (`mail:update.state`, expéditeur
+    « Drone operations », « Drone mission loot ») : `event:claim.item {attachmentId, placement: {x, y, rotated}}`
+    le range dans le stash.
+  - Historique : `drone-missions:get.archived` (sur 6 missions à risque 25 : 1 réussite, 3 partielles, 2 échecs ;
+    dégâts 5, 12 et 25).
+- **Le drone ne donne pas de Renommée** ✅ : 107/900 avant et après un PARTIAL_SUCCESS (23/10) ; la Renommée exacte
+  arrive aussi dans `profile:get.levels {level, progress, nextLevelRequiredXp}` à la connexion. FULL_SUCCESS ❓.
+- La durabilité ne change pas le risque affiché : `finalRisk` 25 au départ avec 100 comme avec 88 de durabilité.
+- Mercenaire du 23/10 (Apex, risque 40, mort 3 %) : `outcome: DEATH` au retour, acompte de 1 900 CR perdu.
+- Écran du drone (boutons) ❓ : à relever avec `ws_dump --dom`, qui capture désormais l'écran à chaque trame.
 
 ## 12. Pièges rencontrés pendant l'inspection
 

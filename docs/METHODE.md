@@ -46,8 +46,8 @@ Dans l'onglet cor3.gg du joueur (connecté), avec l'outil JavaScript :
 
 `python tools/ws_dump.py --minutes 10 --dom` ouvre le jeu dans le profil dédié du bot ; le joueur joue
 l'écran à documenter, le script écrit les trames décodées (secrets masqués) dans `logs/ws_dump_<date>.jsonl`
-l'inventaire des sélecteurs dans `logs/dom_<date>.json` et le HTML de l'écran final (JWT masqués) dans
-`logs/dom_<date>.html`. Il prend le verrou du bot : il refuse de démarrer pendant un passage, et les tâches
+et, avec `--dom`, des captures de l'écran dans `logs/dom_<date>/` (HTML, JWT masqués, + inventaire des sélecteurs) : à
+chaque action du joueur, à chaque trame des salles `--snap` (drone, expéditions, courrier, stash) et à la fin. Il prend le verrou du bot : il refuse de démarrer pendant un passage, et les tâches
 planifiées attendent ou passent leur tour pendant l'enregistrement. Ces fichiers peuvent être donnés à une nouvelle
 conversation.
 

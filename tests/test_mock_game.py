@@ -7,6 +7,7 @@ debout, sans toucher au vrai site. Lancement : python -m pytest tests -q
 import asyncio
 import datetime as dt
 import http.server
+import io
 import json
 import logging
 import os
@@ -435,3 +436,24 @@ def test_job_dry_run_signs_nothing(make_bot):
     assert summary.startswith("0 job(s) terminé(s)"), summary
     assert m["completed"] == [] and m["downloads"] == []
     assert bot.page.evaluate("JOBS['m-d4rk'][0].status") == "AVAILABLE"
+
+
+def test_ws_dump_snapshots_on_player_actions(make_bot, tmp_path):
+    """ws_dump --dom : une action du joueur (trame sortante « event ») ou une trame du drone demande une capture ;
+    les bruyantes (get.lots…) non. La capture écrit le HTML, JWT masqués, et l'inventaire des sélecteurs."""
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
+    import ws_dump
+    rec = ws_dump.Recorder(logging.getLogger("cor3-test"), io.StringIO(), set(), {"drone-missions"})
+    rec._push("in", "market", "get.lots", {})
+    assert rec.snap_due is None
+    rec._push("in", "drone-missions", "get.options", {})
+    assert rec.snap_due == "drone-missions_get.options"
+    rec._push("out", "event", "launch", {})
+    assert rec.snap_due == "toi_launch"
+    bot = make_bot()
+    bot.page.evaluate("document.body.insertAdjacentHTML('beforeend', '<i>eyJhbGciOiJIUzI1.eyJzdWIiOiIxMjM0.SflKxwRJSMeKKF2</i>')")
+    html = ws_dump.snapshot(bot.page, tmp_path / "dom", rec.snap_due, 1)
+    assert html.name.startswith("001_") and html.name.endswith("_toi_launch.html")
+    text = html.read_text(encoding="utf-8")
+    assert "LevelIndicatorTop" in text and "eyJhbGciOiJIUzI1" not in text
+    assert "onboarding_id" in html.with_suffix(".json").read_text(encoding="utf-8")
