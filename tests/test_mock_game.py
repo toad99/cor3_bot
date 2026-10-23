@@ -477,6 +477,15 @@ def test_drone_mission_launched_watched_and_looted(make_bot, tmp_path):
     assert bot.page.locator(cor3_bot.cname("StashPage")).count() == 0        # stash refermé (« Retour »)
 
 
+def test_drone_loot_through_the_transfer_screen(make_bot, tmp_path):
+    """« Tout récupérer » ouvre l'écran de transfert (relevé le 23/10) : le bot clique « Tout prendre »."""
+    bot = make_bot(state=cor3_bot.State(tmp_path / "state.json"), extra="&mailview=transfer")
+    summary = bot.run_drone()
+    assert bot.page.evaluate("window.__mock_drone")["claimed"] == 2, summary
+    assert "courrier : 2 objet(s) récupéré(s)" in summary
+    assert bot.page.locator(cor3_bot.cname("StashPage")).count() == 0
+
+
 def test_drone_waits_for_its_battery(make_bot, tmp_path):
     state = cor3_bot.State(tmp_path / "state.json")
     bot = make_bot(extra="&drone=10", state=state)

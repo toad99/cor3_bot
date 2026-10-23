@@ -131,6 +131,7 @@ TXT = {
     "drone_launch": r"Démarrer la sortie|Start sortie|Launch",
     "drone_send": r"^\s*(Envoyer|Send)\s*$",
     "claim_all": r"^\s*(Tout récupérer|Claim all|Collect all)\s*$",
+    "take_all": r"^\s*(Tout prendre|Take all)\s*$",
     "disconnected": r"DÉCONNECTÉ|DISCONNECTED",
 }
 
@@ -2603,7 +2604,9 @@ class Bot:
         return f"drone lancé ({mission.get('name')}, risque {started.get('finalRisk')})", started
 
     def claim_mail(self) -> str:
-        """Stash → Boîte aux lettres → « Tout récupérer » (mail:claim.all) : le butin du drone est gratuit."""
+        """Stash → Boîte aux lettres → « Tout récupérer » : le butin du drone est gratuit. Selon les fois, le jeu
+        envoie mail:claim.all tout de suite, ou ouvre l'écran de transfert (TransferPanel : « Objets », « Tout
+        prendre ») où il faut encore cliquer « Tout prendre » (relevé le 23/10 à 09:21)."""
         pending = self.events.last("mail", "update.state") or self.events.last("mail", "get.state")
         if pending and isinstance(pending.data, dict) and not pending.data.get("pendingCount"):
             return ""
@@ -2611,25 +2614,59 @@ class Bot:
         self.close_all_windows()
         self.dock("stash")
         page = self.page.locator(cname("StashPage"))
+        transfer = page.locator(cname("TransferPanel"))
         try:
             page.wait_for(timeout=15000)
             panel = page.locator(cname("MailboxPanel"))
-            panel.wait_for(timeout=10000)
-            claim = panel.locator(cname("StashButton")).filter(has_text=rx(TXT["claim_all"])).first
-            if not claim.count() or not claim.is_enabled():
-                return "courrier : rien à récupérer"
-            if not self.allowed("récupérer le butin du courrier (Tout récupérer)"):
-                return "simulation : butin non récupéré"
-            self.safe_click(claim)
-            ev = self.wait_event("mail", "claim.all", mark, timeout=15)
-            got = [r for r in (ev.data or {}).get("results") or [] if r.get("status") == "claimed"] \
-                if isinstance(ev.data, dict) else []
-            return f"courrier : {len(got)} objet(s) récupéré(s)"
+            try:
+                panel.or_(transfer).first.wait_for(timeout=10000)
+            except PWTimeout:
+                raise StepFailed("stash ouvert, mais ni boîte aux lettres ni écran de transfert")
+            if not transfer.count():
+                claim = panel.locator(cname("StashButton")).filter(has_text=rx(TXT["claim_all"])).first
+                if not claim.count() or not claim.is_enabled():
+                    return "courrier : rien à récupérer"
+                if not self.allowed("récupérer le butin du courrier (Tout récupérer)"):
+                    return "simulation : butin non récupéré"
+                self.safe_click(claim)
+                deadline = time.time() + 10
+                while time.time() < deadline and not self.mail_claimed(mark) and not transfer.count():
+                    self.pause(200)
+            if transfer.count() and not self.mail_claimed(mark):
+                take = transfer.locator(cname("StashButton")).filter(has_text=rx(TXT["take_all"])).first
+                if not take.count():
+                    self.snapshot("courrier_transfert")
+                    raise StepFailed("écran de transfert du courrier sans « Tout prendre » : écran à relever "
+                                     "(logs/debug/*courrier_transfert*)")
+                if not self.allowed("prendre le butin du courrier (Tout prendre)"):
+                    return "simulation : butin non récupéré"
+                self.safe_click(take)
+            deadline = time.time() + 15
+            while time.time() < deadline and not self.mail_claimed(mark):
+                self.pause(200)
+            done = self.mail_claimed(mark)
+            if not done:
+                self.snapshot("courrier_transfert")
+                raise StepFailed("butin du courrier non récupéré : aucune trame « mail » de récupération en 15 s "
+                                 "(logs/debug/*courrier_transfert*)")
+            claimed = [r for e in self.events.find(mark, "mail", "claim.all") if isinstance(e.data, dict)
+                       for r in e.data.get("results") or [] if r.get("status") == "claimed"]
+            claimed += self.events.find(mark, "mail", "claim.item")
+            return f"courrier : {len(claimed)} objet(s) récupéré(s)" if claimed else "courrier : butin récupéré"
         finally:
+            if transfer.count():
+                self.page.keyboard.press("Escape")
+                self.pause(500)
             back = self.page.locator(cname("StashHeader")).locator(cname("StashButton")).filter(has_text=rx(TXT["back"]))
             if back.count():
                 self.safe_click(back.first)
                 self.pause(800)
+
+    def mail_claimed(self, since: int) -> bool:
+        """Une trame dit que le courrier est vidé : claim.all, claim.item, ou update.state sans rien en attente."""
+        return bool(self.events.find(since, "mail", None, pred=lambda e: e.action in ("claim.all", "claim.item")
+                                     or (e.action == "update.state" and isinstance(e.data, dict)
+                                         and not e.data.get("pendingCount"))))
 
     def drone_next_time(self, opts: dict, mission: dict | None) -> tuple[dt.datetime | None, str]:
         """Quand repasser : au retour de la mission en cours, ou quand la batterie suffira pour la suivante."""

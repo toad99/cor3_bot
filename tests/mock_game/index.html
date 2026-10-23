@@ -167,7 +167,23 @@ function openStash() {
       ${MAIL.map(m => `<div data-component-name="MailCard">Drone mission loot</div>`).join('')}</section></div>`);
   emit('stash', 'get.state', {items: []});
 }
+// &mailview=transfer : relevé en vrai le 23/10 à 09:21, « Tout récupérer » ouvre parfois l'écran de transfert
+// (TransferPanel, « Objets » + « Tout prendre ») au lieu de récupérer tout de suite. Trame de « Tout prendre » non
+// relevée : la maquette suppose mail:claim.all.
 function claimAll(btn) {
+  if (params.get('mailview') === 'transfer') {
+    document.getElementById('stash-page').innerHTML = `<div data-component-name="TransferPanel">
+      <div data-component-name="LootGrid">Objets ${MAIL.length}</div>
+      <div data-component-name="TransferActions">
+        <button data-component-name="StashButton" onclick="takeAll(this)">Tout prendre</button>
+        <button data-component-name="StashButton" data-variant="primary">Vers l'inventaire</button></div></div>`;
+    document.addEventListener('keydown', e => { if (e.key === 'Escape' && document.getElementById('stash-page')) {
+      document.getElementById('stash-page').remove(); document.getElementById('dock').style.display = ''; } });
+    return;
+  }
+  takeAll(btn);
+}
+function takeAll(btn) {
   const results = MAIL.splice(0).map(m => ({attachmentId: m.id, status: 'claimed'}));
   window.__mock_drone.claimed += results.length; btn.disabled = true;
   emit('mail', 'claim.all', {results});
