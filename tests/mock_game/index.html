@@ -23,6 +23,7 @@
   <div data-onboarding-300-id="TabBarItem-NETWORK_MAP" onclick="openMap()">MAP</div>
   <div data-onboarding-300-id="TabBarItem-EXPEDITIONS" onclick="openExpeditions()">EXP</div>
   <div data-onboarding-300-id="LoadoutTabBarItem">LOADOUT</div>
+  <div data-onboarding-300-id="StashTabBarItem" onclick="openStash()">STASH</div>
 </div>
 <div id="windows"></div>
 <script>
@@ -49,7 +50,8 @@ const EXPEDITIONS = EXP === 'running' ? [{id: 'exp-1', status: 'RUNNING', mercen
 if (WS_PORT) { const ws = new WebSocket(`ws://127.0.0.1:${WS_PORT}/socket.io/?EIO=4&transport=websocket`); ws.binaryType = 'arraybuffer'; window.__ws = ws;
   // v1.25.71 : le client rejoint toutes les salles à la connexion (join-room) et le serveur répond par leur
   // état, dont expeditions:get.active. Rien n'est envoyé ensuite à l'ouverture de la fenêtre Expéditions.
-  if (EXP !== 'nopush') ws.addEventListener('open', () => emit('expeditions', 'get.active', EXPEDITIONS)); }
+  if (EXP !== 'nopush') ws.addEventListener('open', () => emit('expeditions', 'get.active', EXPEDITIONS));
+  ws.addEventListener('open', () => { emit('drone-missions', 'get.active', null); emit('mail', 'get.state', {pendingCount: MAIL.length}); }); }
 
 function el(html) { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstElementChild; }
 function openWindow(appName, title, inner) {
@@ -82,12 +84,94 @@ function openGameCenter() {
     </div>
   </div>`));
 }
+// Drone personnel, relevé en v1.25.71 (23/10/2026) : &drone=<batterie> (défaut 52), &dronedur=<durabilité>.
+// « Démarrer la sortie » part tout de suite (drone-missions:launch) ; une décision arrive, puis le retour
+// (drone-missions:completed) et le butin au courrier (Stash → Boîte aux lettres → Tout récupérer).
+const DRONE = {drone: {id: 'drone-1', name: 'Agatha', durability: +(params.get('dronedur') || 83), maxDurability: 100,
+               isRepairing: false, isDestroyed: false},
+               battery: {current: +(params.get('drone') || 52), max: 100, restorePerHour: 8.33},
+               repairRate: {creditsPerPoint: 200, secondsPerPoint: 200}, activeMissionId: null,
+               locations: [{id: 'loc-mars', name: 'The Surface of Mars', baseRisk: 25,
+                            missions: [{id: 'mis-1', name: 'Surface Exploration', batteryCost: 30, durationSeconds: 1200}]}]};
+const DECISION = {eventId: 'ev-2', type: 'DECISION', message: 'An old emergency beacon has been detected. The signal is unstable.',
+  isResolved: false, isResolvable: true, options: [
+    {id: 'opt-investigate', label: 'Investigate the source', effect: {riskDelta: 0.12, lootDelta: 0.4}, requiredModuleId: null},
+    {id: 'opt-ignore', label: 'Ignore it', effect: {riskDelta: 0, lootDelta: 0}, requiredModuleId: null},
+    {id: 'opt-remote', label: 'Scan remotely', effect: {riskDelta: 0, lootDelta: 0.5}, requiredModuleId: 'mod-x'}]};
+const MAIL = [];
+window.__mock_drone = {launched: 0, resolved: [], claimed: 0};
+function droneTab() {
+  const box = document.getElementById('drone-tab');
+  if (!box) return;
+  if (!DRONE.activeMissionId) {
+    box.innerHTML = `<div data-sentry-component="ExpeditionsPidlDroneLaunch" data-component-name="ExpeditionsPidlDroneLaunch">
+      <h2>${DRONE.drone.name}</h2><button data-sentry-component="Button" onclick="launchDrone()">Démarrer la sortie</button>
+      <div data-component-name="PidlDroneConditionBattery">Batterie <b>${DRONE.battery.current}</b> / 100</div>
+      <button data-sentry-component="Button">Réparation</button></div>`;
+    return;
+  }
+  box.innerHTML = `<div data-sentry-component="ExpeditionsPidlDroneActiveMission" data-component-name="ExpeditionsPidlDroneActiveMission">
+    <div data-component-name="ExpeditionsPidlDroneActiveEvents">${(window.__droneEvents || []).map(e => `
+      <div data-sentry-component="ExpeditionsEventCard" data-component-name="ExpeditionsEventCard"><p>${e.message}</p>
+      ${e.isResolved ? '' : (e.options || []).map(o => `<span data-sentry-component="InfoTooltip"><div data-sentry-component="ChamferedButton"
+        data-component-name="ChamferedButton" onclick="resolveDrone('${e.eventId}', '${o.id}')"><span>${o.label}</span></div></span>`).join('')}
+      </div>`).join('')}</div></div>`;
+}
+function showDrone(win) {
+  win.querySelector('[data-component-name=ExpeditionsActiveTab]')?.remove();
+  if (!win.querySelector('#drone-tab'))
+    win.querySelector('[data-sentry-component=ExpeditionsApplication]').insertAdjacentHTML('beforeend',
+      '<div data-sentry-component="ExpeditionsPidlDroneTab" data-component-name="ExpeditionsPidlDroneTab" id="drone-tab"></div>');
+  emit('drone-missions', 'get.options', DRONE);
+  droneTab();
+}
+function launchDrone() {
+  DRONE.battery.current -= 30; DRONE.activeMissionId = 'mission-1'; window.__mock_drone.launched++;
+  window.__droneEvents = [];
+  emit('drone-missions', 'launch', {id: 'mission-1', status: 'RUNNING', finalRisk: 25, batteryCost: 30,
+       channelEvents: [{...DECISION, isResolvable: false}]});
+  droneTab();
+  setTimeout(() => { window.__droneEvents.push(DECISION);
+    emit('drone-missions', 'event', {missionId: 'mission-1', droneDurability: DRONE.drone.durability, event: DECISION}); droneTab(); }, 800);
+}
+function resolveDrone(eventId, optionId) {
+  const e = window.__droneEvents.find(x => x.eventId === eventId); e.isResolved = true;
+  window.__mock_drone.resolved.push(optionId);
+  emit('drone-missions', 'resolve.event', {id: 'mission-1', status: 'RUNNING'});
+  droneTab();
+  setTimeout(() => {
+    DRONE.activeMissionId = null; DRONE.drone.durability -= 5;
+    MAIL.push({id: 'att-1'}, {id: 'att-2'});
+    emit('drone-missions', 'completed', {missionId: 'mission-1', outcome: 'FULL_SUCCESS', damageDealt: 5,
+         durabilityAfter: DRONE.drone.durability, destroyed: false,
+         loot: [{name: 'CCS colonists cap', quantity: 1}, {name: 'Water Vial', quantity: 1}]});
+    emit('mail', 'update.state', {pendingCount: MAIL.length});
+    droneTab(); }, 1500);
+}
+function openStash() {
+  document.getElementById('dock').style.display = 'none';
+  document.body.insertAdjacentHTML('beforeend', `<div data-component-name="StashPage" id="stash-page">
+    <div data-component-name="StashHeader"><button data-component-name="StashButton" onclick="document.getElementById('stash-page').remove();
+      document.getElementById('dock').style.display = ''">Retour</button></div>
+    <section data-component-name="MailboxPanel"><header>Boîte aux lettres
+      <button data-component-name="StashButton" ${MAIL.length ? '' : 'disabled'} onclick="claimAll(this)">Tout récupérer</button></header>
+      ${MAIL.map(m => `<div data-component-name="MailCard">Drone mission loot</div>`).join('')}</section></div>`);
+  emit('stash', 'get.state', {items: []});
+}
+function claimAll(btn) {
+  const results = MAIL.splice(0).map(m => ({attachmentId: m.id, status: 'claimed'}));
+  window.__mock_drone.claimed += results.length; btn.disabled = true;
+  emit('mail', 'claim.all', {results});
+  emit('mail', 'update.state', {pendingCount: 0});
+}
+
 // Expéditions, relevé en v1.25.71 (21/10/2026) sans expédition en cours : onglets et état vide. La liste est
 // arrivée à la connexion (voir plus haut), aucune trame à l'ouverture. Avec une expédition, la structure de
 // l'onglet n'a jamais été relevée en v1.25.71 : simple texte ici.
 function openExpeditions() {
   const tab = name => `<div data-sentry-component="ExpeditionsTabItem" data-component-name="ExpeditionsTabItem">
-     <button data-sentry-element="ExpeditionsTabItemButtonStyled">${name}</button></div>`;
+     <button data-sentry-element="ExpeditionsTabItemButtonStyled"
+       ${/Drone/.test(name) ? `onclick="showDrone(this.closest('[data-sentry-component=AppWindow]'))"` : ''}>${name}</button></div>`;
   openWindow('EXPEDITIONS', 'Expéditions', el(`<div data-sentry-component="ExpeditionsApplication" data-component-name="ExpeditionsApplication">
     <div data-sentry-component="ExpeditionsTabs" data-component-name="ExpeditionsTabs">
       ${tab('Expéditions actives')}${tab('Drone personnel')}${tab('Archives des raids')}</div>

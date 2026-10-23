@@ -18,6 +18,7 @@ Ce que le bot sait de l'interface : `docs/INSPECTION.md` ; comment l'inspecter �
 | Serveurs | Connexion par l'accès « par tâche », sinon par ton outil de piratage : **repiratage automatique après une maintenance** (direct ou ICE WALL) ; serveurs en maintenance ou injoignables évités et retentés plus tard | activé (`allow_hack`) |
 | Jobs destructifs | IP Cleanup, Log Deletion, File Elimination, IP Injection | **désactivés** (`allow_deletions`, `allow_ip_add`) |
 | `mercs` | Suivi d'une expédition en cours (jusqu'à `watch_minutes`), réponse aux événements (prudent / gourmand / auto) | activé (ne dépense rien) |
+| `drone` | Drone personnel : récupère le butin au courrier, lance une mission dès que la batterie le permet (30 sur 100, recharge 8,33/h), reste jusqu'au retour (20 min) pour répondre aux événements (prudent / gourmand / auto) ; ne part pas sous `min_durability` ; ne répare jamais (`repair_below` ne fait qu'alerter) | désactivé (`[drone] enabled`) |
 | Dépenses | Engager un mercenaire, payer le solde au retour ; « force hack » : jamais | **désactivées** (`hire`, `pay_on_return`) |
 
 Chaque action qui valide quelque chose passe par un point de contrôle : en `--dry-run`, le script s'arrête
@@ -90,8 +91,8 @@ Deux tâches sont créées :
 
 | Tâche | Quand | Ce qu'elle fait |
 |---|---|---|
-| `cor3_bot` | tous les jours à 02:15 (heure de Windows), réveille le PC, rattrape l'heure manquée | passage complet : daily, 4 marchés + jobs, minuteurs, mercenaires |
-| `cor3_bot_auto` | tous les quarts d'heure (hh:05, 20, 35, 50) | ne lance Chrome que si quelque chose est dû : daily pas faite, minuteur de marché échu, expédition en cours ; ne fait rien si tu as utilisé le PC dans les 10 dernières minutes (pour ne pas te voler la session) |
+| `cor3_bot` | tous les jours à 02:15 (heure de Windows), réveille le PC, rattrape l'heure manquée | passage complet : daily, 4 marchés + jobs, minuteurs, mercenaires, drone |
+| `cor3_bot_auto` | tous les quarts d'heure (hh:05, 20, 35, 50) | ne lance Chrome que si quelque chose est dû : daily pas faite, minuteur de marché échu, expédition en cours, drone rentré ou batterie rechargée ; ne fait rien si tu as utilisé le PC dans les 10 dernières minutes (pour ne pas te voler la session) |
 
 Chaque minuteur de marché ne repart que quand le bot ouvre le marché : le prendre dans le quart d'heure
 au lieu de l'heure laisse passer plus de listes de contrats, donc plus de jobs (et de Renommée).

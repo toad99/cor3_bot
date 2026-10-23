@@ -14,7 +14,7 @@ NOW = dt.datetime(2026, 10, 21, 9, 0, tzinfo=UTC)
 
 def cfg(**sections):
     base = {"general": {}, "daily": {"enabled": True}, "jobs": {"enabled": True}, "markets": {},
-            "mercenaries": {"enabled": True}, "notify": {}, "auto": {}}
+            "mercenaries": {"enabled": True}, "drone": {}, "notify": {}, "auto": {}}
     for key, value in sections.items():
         base[key] = {**base[key], **value}
     return base
@@ -75,6 +75,43 @@ def test_due_and_auto_decision(tmp_path):
     state.set_expedition(True)
     assert cor3_bot.auto_decision(config, state, NOW, idle_s=None)[0] == ["mercs"]
     assert cor3_bot.auto_decision(config, state, later, idle_s=None, only=["mercs"])[0] == ["mercs"]
+
+
+def test_drone_is_due_when_its_battery_is_back(tmp_path):
+    state = cor3_bot.State(tmp_path / "state.json")
+    for name in cor3_bot.DEFAULT_MARKETS:
+        state.set_market_reset(name, NOW + dt.timedelta(hours=6), now=NOW)
+    state.mark_daily_done(NOW)
+    config = cfg(drone={"enabled": True})
+    assert cor3_bot.auto_decision(config, state, NOW, idle_s=None)[0] == ["drone"]      # jamais vu : au plus tôt
+    state.set_drone_next(NOW + dt.timedelta(hours=2), "batterie 13/30")
+    assert cor3_bot.auto_decision(config, state, NOW, idle_s=None)[0] == []
+    assert cor3_bot.auto_decision(config, state, NOW + dt.timedelta(hours=2), idle_s=None)[0] == ["drone"]
+    assert cor3_bot.auto_decision(cfg(), state, NOW + dt.timedelta(hours=2), idle_s=None)[0] == []   # désactivé
+
+
+def test_drone_choice_follows_the_policy():
+    """Événements relevés le 23/10 : gourmand = le plus de butin sans module et risque <= max_risk_delta."""
+    hazard = {"type": "HAZARD", "options": [
+        {"id": "a", "label": "Continue the mission", "effect": {"riskDelta": 0.15, "lootDelta": 0}, "requiredModuleId": None},
+        {"id": "b", "label": "Survey the area remotely", "effect": {"riskDelta": 0, "lootDelta": 0},
+         "requiredModuleId": "019f36db-c2be-7c47-9dcb-0d8691b86418"}]}
+    decision = {"type": "DECISION", "options": [
+        {"id": "c", "label": "Inspect the worksite", "effect": {"riskDelta": 0.1, "lootDelta": 0.3}},
+        {"id": "d", "label": "Continue the mission", "effect": {"riskDelta": 0, "lootDelta": 0}},
+        {"id": "e", "label": "Gather data remotely", "effect": {"riskDelta": 0.03, "lootDelta": 0.2},
+         "requiredModuleId": "019f36db-c2be-784c-91cc-af94b026374e"}]}
+
+    def choice(event, **drone):
+        bot = cor3_bot.Bot.__new__(cor3_bot.Bot)
+        bot.cfg = {"drone": drone}
+        picked = bot.drone_choice(event)
+        return picked and picked["id"]
+    assert choice(hazard) == "a"                                   # la seule option sans module
+    assert choice(decision) == "c"                                 # gourmand par défaut
+    assert choice(decision, max_risk_delta=0.05) == "d"
+    assert choice(decision, event_policy="prudent") == "d"
+    assert choice(decision, event_policy="auto") is None
 
 
 def test_signed_job_brings_its_market_back(tmp_path):

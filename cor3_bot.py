@@ -68,6 +68,7 @@ DOCK = {
     "network_map": "TabBarItem-NETWORK_MAP",
     "expeditions": "TabBarItem-EXPEDITIONS",
     "loadout": "LoadoutTabBarItem",
+    "stash": "StashTabBarItem",
 }
 APP_SIGNAL_DECODE = "019aea65-b0c2-70e9-bbbc-8caed416854c"
 
@@ -126,6 +127,9 @@ TXT = {
     "apply": r"^\s*(APPLIQUER|APPLY)\s*$",
     "back": r"^\s*(Retour|Back)\s*$",
     "hire_pay": r"verser un acompte|pay.*deposit|hire and",
+    "drone_tab": r"Drone personnel|Personal drone",
+    "drone_launch": r"Démarrer la sortie|Start sortie|Launch",
+    "claim_all": r"^\s*(Tout récupérer|Claim all|Collect all)\s*$",
     "disconnected": r"DÉCONNECTÉ|DISCONNECTED",
 }
 
@@ -177,7 +181,7 @@ def load_config(path: Path) -> dict:
     with path.open("rb") as fh:
         cfg = tomllib.load(fh)
     cfg.setdefault("general", {})
-    for section in ("daily", "jobs", "markets", "mercenaries", "notify", "auto"):
+    for section in ("daily", "jobs", "markets", "mercenaries", "drone", "notify", "auto"):
         cfg.setdefault(section, {})
     return cfg
 
@@ -364,6 +368,16 @@ class State:
     def set_expedition(self, active: bool) -> None:
         self.data["expedition_active"] = bool(active)
 
+    # ----- drone personnel -----
+    def set_drone_next(self, when: dt.datetime | None, why: str = "") -> None:
+        """Prochain passage utile pour le drone : retour de mission, batterie rechargée (None = au plus tôt)."""
+        self.data["drone"] = {"next": when.isoformat(timespec="seconds") if when else None, "why": why}
+
+    def drone_due(self, now: dt.datetime | None = None) -> bool:
+        entry = self.data.get("drone") or {}
+        when = parse_time(entry.get("next")) if isinstance(entry, dict) else None
+        return when is None or (now or utc_now()) >= when
+
     def due(self, cfg: dict, now: dt.datetime | None = None) -> dict[str, str]:
         """Parties à lancer maintenant (mode --auto), avec la raison."""
         now = now or utc_now()
@@ -387,6 +401,8 @@ class State:
                 due["markets"] = why
         if cfg["mercenaries"].get("enabled", False) and self.data.get("expedition_active"):
             due["mercs"] = "expédition en cours"
+        if cfg["drone"].get("enabled", False) and self.drone_due(now):
+            due["drone"] = "drone : retour de mission ou batterie rechargée"
         return due
 
     def save(self) -> None:
@@ -2374,11 +2390,259 @@ class Bot:
         self.wait_event("expeditions", "collect.all", mark, timeout=15)
         return f"{name} : {outcome}, butin récupéré, solde payé {remaining} CR"
 
+    # =========================================================================
+    # 4. Drone personnel (Expéditions → Drone personnel), relevé le 23/10/2026 en v1.25.71
+    # =========================================================================
+    def run_drone(self) -> str:
+        """Récupère le butin au courrier, lance une mission dès que la batterie le permet et, si `watch`,
+        reste jusqu'au retour pour répondre aux événements. Une mission ne coûte que de la batterie ;
+        la réparation (CR) n'est jamais faite par le bot (`repair_below` ne fait qu'alerter)."""
+        dcfg = self.cfg["drone"]
+        watch, minutes = dcfg.get("watch", True), float(dcfg.get("watch_minutes", 25))
+        self.ensure_connected()
+        self.close_all_windows()
+        notes: list[str] = []
+        opts: dict = {}
+        mission: dict | None = None
+        try:
+            opts = self.open_drone()
+            if opts.get("activeMissionId"):
+                mission = self.drone_mission(opts["activeMissionId"])
+                if not watch:
+                    return "mission en cours"
+                notes.append(self.watch_drone(mission, minutes))
+                opts = self.open_drone()
+            if opts.get("activeMissionId"):
+                return "; ".join(notes)
+            if dcfg.get("claim_loot", True):
+                notes.append(self.claim_mail())
+                opts = self.open_drone()
+            note, mission = self.launch_drone(opts)
+            notes.append(note)
+            if mission and watch:
+                notes.append(self.watch_drone(mission, minutes))
+                if dcfg.get("claim_loot", True):
+                    notes.append(self.claim_mail())
+                opts = self.open_drone()
+            elif mission:
+                opts = {**opts, "activeMissionId": mission.get("id")}
+            notes.append(self.drone_repair_note(opts))
+        finally:
+            try:
+                self.close_all_windows()
+            except PWError:
+                pass
+            if self.state is not None and not self.dry_run:
+                when, why = self.drone_next_time(opts, mission)
+                self.state.set_drone_next(when, why)
+                if why:
+                    notes.append(why)
+        return "; ".join(n for n in notes if n) or "rien à faire"
+
+    def drone_repair_note(self, opts: dict) -> str:
+        """`repair_below` (0 = jamais) : alerte quand la durabilité passe sous le seuil. L'écran de réparation
+        n'a pas encore été relevé : le bot ne clique pas « Réparation » (dépense de CR)."""
+        below = int(self.cfg["drone"].get("repair_below", 0) or 0)
+        drone = opts.get("drone") or {}
+        durability = drone.get("durability")
+        if not below or durability is None or int(durability) >= below:
+            return ""
+        rate = (opts.get("repairRate") or {}).get("creditsPerPoint") or 200
+        cost = (int(drone.get("maxDurability") or 100) - int(durability)) * int(rate)
+        return f"drone à réparer : durabilité {durability} < repair_below ({cost} CR pour tout réparer, à faire à la main)"
+
+    def open_drone(self) -> dict:
+        """Ouvre l'onglet Drone personnel ; renvoie drone-missions:get.options (drone, batterie, missions)."""
+        mark = self.events.mark()
+        self.close_window(comp("ExpeditionsApplication"))
+        self.dock("expeditions")
+        win = self.window(comp("ExpeditionsApplication"))
+        win.wait_for(timeout=15000)
+        tab = win.locator(comp("ExpeditionsTabItem")).filter(has_text=rx(TXT["drone_tab"])).locator("button")
+        self.safe_click(tab.first)
+        ev = self.wait_event("drone-missions", "get.options", mark, timeout=15)
+        win.locator(comp("ExpeditionsPidlDroneTab")).wait_for(timeout=10000)
+        data = ev.data if isinstance(ev.data, dict) else {}
+        drone, battery = data.get("drone") or {}, data.get("battery") or {}
+        self.log.info("Drone %s : durabilité %s/%s, batterie %s/%s, mission en cours : %s", drone.get("name"),
+                      drone.get("durability"), drone.get("maxDurability"), battery.get("current"),
+                      battery.get("max"), "oui" if data.get("activeMissionId") else "non")
+        return data
+
+    def drone_mission(self, mission_id: str) -> dict:
+        """La mission en cours, d'après la dernière trame qui la décrit (départ, connexion, réponse)."""
+        for action in ("resolve.event", "launch", "get.active"):
+            ev = self.events.last("drone-missions", action)
+            for m in self._missions(ev.data if ev else None):
+                if m.get("id") == mission_id:
+                    return m
+        return {"id": mission_id}
+
+    def drone_choice(self, event: dict) -> dict | None:
+        """Option choisie pour un événement du drone (DECISION, HAZARD), d'après `event_policy`.
+        Les options qui demandent un module du drone (`requiredModuleId`) sont écartées : le joueur n'en a pas."""
+        dcfg = self.cfg["drone"]
+        policy = dcfg.get("event_policy", "gourmand")
+        options = [o for o in event.get("options") or []
+                   if not (isinstance(o.get("requiredModuleId"), str) and o["requiredModuleId"])]
+        if not options or policy == "auto":
+            return None
+        max_risk = float(dcfg.get("max_risk_delta", 0.15))
+
+        def risk(o): return float((o.get("effect") or {}).get("riskDelta") or 0)
+
+        def loot(o): return float((o.get("effect") or {}).get("lootDelta") or 0)
+        if policy == "gourmand":
+            pool = [o for o in options if risk(o) <= max_risk] or options
+            return max(pool, key=lambda o: (loot(o), -risk(o)))
+        return min(options, key=lambda o: (risk(o), -loot(o)))       # prudent
+
+    def watch_drone(self, mission: dict, max_minutes: float) -> str:
+        """Répond aux événements (trames drone-missions:event) jusqu'au retour (drone-missions:completed)."""
+        mission_id = mission.get("id")
+        win = self.window(comp("ExpeditionsApplication"))
+        deadline = time.time() + max_minutes * 60
+        answered = {e.get("eventId") for e in mission.get("channelEvents") or [] if e.get("isResolved")}
+        # mission reprise en cours de route : les événements déjà arrivés sont dans la mission (isResolvable)
+        for e in mission.get("channelEvents") or []:
+            if e.get("isResolvable") and e.get("eventId") not in answered:
+                answered.add(e.get("eventId"))
+                self.answer_drone_event(win, mission_id, e)
+        while time.time() < deadline:
+            self.check_session()
+            done = self.events.last("drone-missions", "completed")
+            if done and isinstance(done.data, dict) and done.data.get("missionId") == mission_id:
+                d = done.data
+                loot = ", ".join(f"{x.get('name')} x{x.get('quantity', 1)}" for x in d.get("loot") or []) or "rien"
+                self.log.info("Drone de retour : %s, dégâts %s (durabilité %s), butin : %s", d.get("outcome"),
+                              d.get("damageDealt"), d.get("durabilityAfter"), loot)
+                return f"mission {d.get('outcome')} (durabilité {d.get('durabilityAfter')}, butin : {loot})"
+            for ev in self.events.find(0, "drone-missions", "event"):
+                data = ev.data if isinstance(ev.data, dict) else {}
+                event = data.get("event") or {}
+                if data.get("missionId") != mission_id or not event.get("isResolvable") \
+                        or event.get("eventId") in answered:
+                    continue
+                answered.add(event.get("eventId"))
+                self.answer_drone_event(win, mission_id, event)
+            self.pause(2000)
+        return "surveillance du drone terminée (durée max atteinte)"
+
+    def answer_drone_event(self, win: Locator, mission_id: str, event: dict) -> None:
+        option = self.drone_choice(event)
+        self.log.info("Drone, événement %s : %s | options : %s | choix : %s", event.get("type"), event.get("message"),
+                      [(o.get("label"), (o.get("effect") or {}).get("riskDelta"),
+                        (o.get("effect") or {}).get("lootDelta")) for o in event.get("options") or []],
+                      option.get("label") if option else "aucun (défaut du jeu)")
+        if not option or not self.allowed(f"répondre « {option['label']} » au drone"):
+            return
+        if not win.count() or not win.locator(comp("ExpeditionsPidlDroneTab")).count():
+            self.open_drone()
+        card = win.locator(comp("ExpeditionsEventCard")).filter(has_text=(event.get("message") or "")[:40]).first
+        button = card.locator(comp("ChamferedButton")).filter(has_text=option["label"]).first
+        try:
+            button.wait_for(timeout=10000)
+        except PWTimeout:
+            self.snapshot("drone_evenement")
+            self.log.warning("Drone : bouton « %s » introuvable, le jeu choisira", option["label"])
+            return
+        mark = self.events.mark()
+        self.safe_click(button)
+        self.wait_event("drone-missions", "resolve.event", mark, timeout=15)
+
+    def launch_drone(self, opts: dict) -> tuple[str, dict | None]:
+        """Lance la mission (la première proposée, ou `mission`) ; renvoie la note et la mission partie."""
+        dcfg = self.cfg["drone"]
+        drone, battery = opts.get("drone") or {}, opts.get("battery") or {}
+        missions = [(loc, m) for loc in opts.get("locations") or [] for m in loc.get("missions") or []]
+        wanted = dcfg.get("mission") or ""
+        pick = next(((loc, m) for loc, m in missions if m.get("name") == wanted), missions[0] if missions else None)
+        if pick is None:
+            return "pas de départ : aucune mission proposée", None
+        loc, mission = pick
+        cost = int(mission.get("batteryCost") or 0)
+        durability = int(drone.get("durability") or 0)
+        if drone.get("isDestroyed") or drone.get("isRepairing"):
+            return "pas de départ : drone " + ("détruit" if drone.get("isDestroyed") else "en réparation"), None
+        if int(battery.get("current") or 0) < cost:
+            return f"pas de départ : batterie {battery.get('current')} < {cost}", None
+        if durability < int(dcfg.get("min_durability", 30)):
+            return f"pas de départ : durabilité {durability} < min_durability", None
+        if not self.allowed(f"lancer le drone {drone.get('name')} : {mission.get('name')} ({loc.get('name')}), "
+                            f"{cost} de batterie"):
+            return "simulation : drone non lancé", None
+        win = self.window(comp("ExpeditionsApplication"))
+        start = win.locator(comp("ExpeditionsPidlDroneLaunch")).locator(comp("Button")).filter(
+            has_text=rx(TXT["drone_launch"])).first
+        mark = self.events.mark()
+        self.safe_click(start)
+        try:
+            ev = self.wait_event("drone-missions", "launch", mark, timeout=12)
+        except StepFailed:
+            self.snapshot("drone_depart")
+            raise StepFailed("« Démarrer la sortie » cliqué, mais le drone n'est pas parti : écran à relever "
+                             "(logs/debug/*drone_depart*)")
+        started = ev.data if isinstance(ev.data, dict) else {}
+        self.log.info("Drone lancé : %s, risque %s, %s de batterie, retour vers %s", mission.get("name"),
+                      started.get("finalRisk"), cost, local_time(started.get("endTime")))
+        return f"drone lancé ({mission.get('name')}, risque {started.get('finalRisk')})", started
+
+    def claim_mail(self) -> str:
+        """Stash → Boîte aux lettres → « Tout récupérer » (mail:claim.all) : le butin du drone est gratuit."""
+        pending = self.events.last("mail", "update.state") or self.events.last("mail", "get.state")
+        if pending and isinstance(pending.data, dict) and not pending.data.get("pendingCount"):
+            return ""
+        mark = self.events.mark()
+        self.close_all_windows()
+        self.dock("stash")
+        page = self.page.locator(cname("StashPage"))
+        try:
+            page.wait_for(timeout=15000)
+            panel = page.locator(cname("MailboxPanel"))
+            panel.wait_for(timeout=10000)
+            claim = panel.locator(cname("StashButton")).filter(has_text=rx(TXT["claim_all"])).first
+            if not claim.count() or not claim.is_enabled():
+                return "courrier : rien à récupérer"
+            if not self.allowed("récupérer le butin du courrier (Tout récupérer)"):
+                return "simulation : butin non récupéré"
+            self.safe_click(claim)
+            ev = self.wait_event("mail", "claim.all", mark, timeout=15)
+            got = [r for r in (ev.data or {}).get("results") or [] if r.get("status") == "claimed"] \
+                if isinstance(ev.data, dict) else []
+            return f"courrier : {len(got)} objet(s) récupéré(s)"
+        finally:
+            back = self.page.locator(cname("StashHeader")).locator(cname("StashButton")).filter(has_text=rx(TXT["back"]))
+            if back.count():
+                self.safe_click(back.first)
+                self.pause(800)
+
+    def drone_next_time(self, opts: dict, mission: dict | None) -> tuple[dt.datetime | None, str]:
+        """Quand repasser : au retour de la mission en cours, ou quand la batterie suffira pour la suivante."""
+        now = utc_now()
+        if opts.get("activeMissionId"):
+            end = parse_time((mission or {}).get("endTime")) or now + dt.timedelta(minutes=20)
+            return end + dt.timedelta(minutes=1), f"drone en mission jusqu'à {local_time(end)}"
+        drone, battery = opts.get("drone") or {}, opts.get("battery") or {}
+        if not drone:
+            return None, ""
+        dcfg = self.cfg["drone"]
+        if int(drone.get("durability") or 0) < int(dcfg.get("min_durability", 30)):
+            later = now + dt.timedelta(hours=6)
+            return later, (f"drone à réparer (durabilité {drone.get('durability')} < min_durability), "
+                           f"je repasserai vers {local_time(later)}")
+        costs = [int(m.get("batteryCost") or 0) for loc in opts.get("locations") or [] for m in loc.get("missions") or []]
+        cost, current = min(costs or [30]), float(battery.get("current") or 0)
+        if current >= cost:
+            return None, ""
+        rate = float(battery.get("restorePerHour") or 8.33) or 8.33
+        when = now + dt.timedelta(hours=(cost - current) / rate, minutes=2)
+        return when, f"batterie {current:g}/{cost} : prochain départ vers {local_time(when)}"
+
 
 # ---------------------------------------------------------------------------
 # Programme principal
 # ---------------------------------------------------------------------------
-SECTION = {"daily": "daily", "jobs": "jobs", "markets": "markets", "mercs": "mercenaries"}
+SECTION = {"daily": "daily", "jobs": "jobs", "markets": "markets", "mercs": "mercenaries", "drone": "drone"}
 DEFAULT_ON = {"daily", "markets"}
 
 

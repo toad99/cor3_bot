@@ -33,8 +33,8 @@ Le joueur indique que les CM du Discord officiel autorisent l'automatisation. To
   - configuration, journal, alertes (`Notifier` : toast Windows, Discord, ntfy) ;
   - `State` (`state.json` : daily faite, minuteur de chaque marché, jobs signés à reprendre, expédition en cours) ;
   - `GameEvents` : écoute du WebSocket socket.io/msgpack et de l'API daily, état des serveurs de la carte ;
-  - `Bot`, en trois parties : `run_daily`, `run_jobs` / `run_markets` (carte, 4 marchés, maintenance, SAI,
-    piratage, ICE WALL, Loadout), `run_mercs` ;
+  - `Bot`, en quatre parties : `run_daily`, `run_jobs` / `run_markets` (carte, 4 marchés, maintenance, SAI,
+    piratage, ICE WALL, Loadout), `run_mercs`, `run_drone` (drone personnel, courrier du stash) ;
   - `main()` : options, verrou, mode `--auto`, historique `logs/history.jsonl`.
 - `solvers.py` : logique pure et testée (lignes de logs, Morse/binaire, ICE WALL avec déduction).
 - `tests/` : unitaires + Playwright contre la maquette `tests/mock_game/index.html`
@@ -95,3 +95,5 @@ python cor3_bot.py --auto                 # ce que fait la tâche du quart d'heu
   Renommée 20, total de crédits gagnés). **La Renommée compte plus que les CR** : chaque job terminé rapporte
   3 points, quel que soit son gain (relevé sur le bandeau `LevelIndicator`, § 2). Viser le nombre de jobs réussis.
   Le bot lit la Renommée à chaque passage (`note_renown`, `--bilan`), et `--auto` tourne tous les quarts d'heure.
+- Drone personnel (23/10) : missions gratuites (batterie), butin au courrier, **aucune Renommée** (succès partiel
+  ou complet). Le joueur veut les objets : `run_drone` part dès que possible, mode gourmand, ne répare jamais.

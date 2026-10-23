@@ -110,7 +110,7 @@ def make_bot(servers, tmp_path):
         cor3_bot.GAME_URL = (f"http://127.0.0.1:{http_port}/index.html?game={game}"
                              f"&difficulty={difficulty}&ws={ws_port}{extra}")
         cfg = {"general": {"log_dir": str(tmp_path)}, "daily": {}, "jobs": jobs or {}, "markets": {},
-               "mercenaries": {}, "notify": {}, "auto": {}}
+               "mercenaries": {}, "drone": {}, "notify": {}, "auto": {}}
         events = cor3_bot.GameEvents(log)
         events.attach(page)
         bot = cor3_bot.Bot(page, cfg, log, events, dry_run, state)
@@ -457,3 +457,43 @@ def test_ws_dump_snapshots_on_player_actions(make_bot, tmp_path):
     text = html.read_text(encoding="utf-8")
     assert "LevelIndicatorTop" in text and "eyJhbGciOiJIUzI1" not in text
     assert "onboarding_id" in html.with_suffix(".json").read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Drone personnel (relevé le 23/10/2026)
+# ---------------------------------------------------------------------------
+def test_drone_mission_launched_watched_and_looted(make_bot, tmp_path):
+    """Batterie suffisante : départ, réponse gourmande (plus de butin, sans module, risque <= 0,15), retour,
+    butin récupéré au courrier ; la batterie restante (22) fixe le prochain passage."""
+    state = cor3_bot.State(tmp_path / "state.json")
+    bot = make_bot(state=state)
+    summary = bot.run_drone()
+    m = bot.page.evaluate("window.__mock_drone")
+    assert m["launched"] == 1 and m["resolved"] == ["opt-investigate"] and m["claimed"] == 2, summary
+    assert "drone lancé (Surface Exploration, risque 25)" in summary
+    assert "mission FULL_SUCCESS (durabilité 78" in summary and "courrier : 2 objet(s) récupéré(s)" in summary
+    assert "batterie 22/30" in summary
+    assert not state.drone_due() and state.drone_due(cor3_bot.utc_now() + dt.timedelta(minutes=60))
+    assert bot.page.locator(cor3_bot.cname("StashPage")).count() == 0        # stash refermé (« Retour »)
+
+
+def test_drone_waits_for_its_battery(make_bot, tmp_path):
+    state = cor3_bot.State(tmp_path / "state.json")
+    bot = make_bot(extra="&drone=10", state=state)
+    summary = bot.run_drone()
+    assert bot.page.evaluate("window.__mock_drone")["launched"] == 0
+    assert "pas de départ : batterie 10 < 30" in summary
+    # 20 points à 8,33 par heure : environ 2 h 24
+    assert not state.drone_due(cor3_bot.utc_now() + dt.timedelta(hours=2))
+    assert state.drone_due(cor3_bot.utc_now() + dt.timedelta(hours=2, minutes=30))
+
+
+def test_drone_low_durability_and_dry_run(make_bot):
+    bot = make_bot(extra="&dronedur=20", jobs=None)
+    bot.cfg["drone"] = {"repair_below": 50}
+    summary = bot.run_drone()
+    assert "pas de départ : durabilité 20 < min_durability" in summary
+    assert "drone à réparer : durabilité 20 < repair_below (16000 CR" in summary
+    bot = make_bot(dry_run=True)
+    assert "simulation : drone non lancé" in bot.run_drone()
+    assert bot.page.evaluate("window.__mock_drone")["launched"] == 0

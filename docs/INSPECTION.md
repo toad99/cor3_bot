@@ -426,7 +426,23 @@ v1.25.71 ✅ (relevé `ws_dump` du 21/10 à 23:44) :
   arrive aussi dans `profile:get.levels {level, progress, nextLevelRequiredXp}` à la connexion. FULL_SUCCESS ❓.
 - La durabilité ne change pas le risque affiché : `finalRisk` 25 au départ avec 100 comme avec 88 de durabilité.
 - Mercenaire du 23/10 (Apex, risque 40, mort 3 %) : `outcome: DEATH` au retour, acompte de 1 900 CR perdu.
-- Écran du drone (boutons) ❓ : à relever avec `ws_dump --dom`, qui capture désormais l'écran à chaque trame.
+- **FULL_SUCCESS sans Renommée non plus** ✅ (23/10, 06:15 : 107/900 avant et après).
+- Écran ✅ (`ws_dump --dom` du 23/10, 05:53–06:16) : fenêtre Expéditions, onglet `ExpeditionsTabItem` « Drone
+  personnel » (envoie `drone-missions:get.options`) → `ExpeditionsPidlDroneTab`. Sans mission :
+  `ExpeditionsPidlDroneLaunch` avec deux `Button` : « Démarrer la sortie » (départ direct ❓ : 30 s entre l'ouverture
+  et `launch`, aucune trame entre les deux) et « Réparation » (écran jamais relevé) ; état dans
+  `PidlDroneConditionDurability` / `PidlDroneConditionBattery` (`data-onboarding-300-id` aussi), modules
+  `PidlDroneModuleSlot`. En mission : `ExpeditionsPidlDroneActiveMission`, minuteur `ExpeditionsProgressTimer`,
+  événements `ExpeditionsPidlDroneActiveEvents` → `ExpeditionsEventCard` (`data-onboarding-300-id`
+  `ExpeditionsEventCard-CAN_ANSWER` ou `-FOUND`), boutons `ChamferedButton` au libellé de l'option, comme les
+  mercenaires.
+- Courrier ✅ : dock `[data-onboarding-300-id="StashTabBarItem"]` → page `StashPage` (sans dock, « Retour » dans
+  `StashHeader`) → `MailboxPanel` : « Tout récupérer » (`StashButton`, `event:claim.all` → `mail:claim.all
+  {results[{attachmentId, status: "claimed"}]}`) ou « Récupérer l'objet » par `MailCard` (`claim.item`, avec la
+  case du stash). Le butin se vend dans le stash (`sell.item` → `profile:receive.credits`) : le bot ne vend rien.
+- Bot (`run_drone`, partie `drone`, maquette `&drone=<batterie>&dronedur=<durabilité>`) : courrier, départ si
+  batterie ≥ coût et durabilité ≥ `min_durability`, surveillance jusqu'au retour, prochain passage dans `state.json`
+  (`drone.next` : retour de mission ou batterie rechargée).
 
 ## 12. Pièges rencontrés pendant l'inspection
 

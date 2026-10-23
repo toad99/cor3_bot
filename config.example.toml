@@ -69,6 +69,20 @@ max_risk_modifier = 10
 watch_minutes = 40        # durée max de surveillance (un raid fait ~20 min)
 hire_market = "Home Server"  # marché où engager (onglet Engager)
 
+[drone]
+# Drone personnel (Expéditions → Drone personnel) : une mission ne coûte que 30 de batterie (recharge
+# 8,33 par heure), dure 20 min et rapporte des objets (au courrier). Pas de Renommée (relevé le 23/10).
+enabled = false
+event_policy = "gourmand" # prudent = moindre risque | gourmand = plus de butin si risque <= max | auto = laisser le jeu choisir
+max_risk_delta = 0.15     # gourmand : hausse de risque acceptée pour un événement (0.15 = +15 %)
+min_durability = 30       # pas de départ en dessous (un échec coûte 25 de durabilité)
+watch = true              # rester jusqu'au retour (20 min) pour répondre aux événements
+watch_minutes = 25
+claim_loot = true         # récupérer le butin au courrier (Stash → Tout récupérer) : gratuit
+mission = ""              # vide = la première proposée (« Surface Exploration »)
+repair_below = 0          # alerte quand la durabilité passe sous ce seuil (0 = jamais) ; la réparation
+                          # (200 CR par point) reste à faire à la main
+
 [notify]
 windows_toast = true      # notification Windows (session ouverte requise)
 discord_webhook = ""      # URL d'un webhook Discord (alerte sur ton téléphone)
@@ -77,7 +91,7 @@ notify_on_success = false
 
 [auto]
 # Mode --auto (tâche horaire « cor3_bot_auto ») : Chrome ne s'ouvre que si quelque chose est dû
-# (daily pas faite, minuteur de marché échu, expédition en cours). Il n'engage jamais de mercenaire.
+# (daily pas faite, minuteur de marché échu, expédition en cours, drone prêt). Il n'engage jamais de mercenaire.
 hours = [0, 24]                # heures locales autorisées [début, fin[ ; ex. [8, 23]
 skip_if_user_active_min = 10   # pas de passage si tu as utilisé le PC il y a moins de N min (0 = toujours)
 warn_daily_hours = 3           # alerte si la daily n'est pas faite N h avant le reset (00:00 UTC)
