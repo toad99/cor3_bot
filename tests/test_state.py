@@ -234,3 +234,15 @@ def test_renown_gain_across_a_level():
     assert cor3_bot.renown_gain((17, 100, 900), (17, 133, 900)) == 33
     assert cor3_bot.renown_gain((16, 769, 800), (17, 5, 900)) == 36
     assert cor3_bot.renown_gain((16, 769, 800), (18, 5, 1000)) is None
+
+
+def test_ws_dump_refuses_while_the_bot_runs(tmp_path, monkeypatch):
+    """ws_dump ouvre le même profil Chrome : jamais pendant un passage du bot (verrou cor3_bot.lock)."""
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
+    import ws_dump
+    monkeypatch.setattr(cor3_bot, "ROOT", tmp_path)
+    (tmp_path / "config.toml").write_text(f'[general]\nlog_dir = "{tmp_path.as_posix()}"\n', encoding="utf-8")
+    lock = tmp_path / "cor3_bot.lock"
+    lock.write_text(json.dumps({"pid": os.getpid()}), encoding="utf-8")
+    assert ws_dump.main(["--config", str(tmp_path / "config.toml")]) == 2
+    assert lock.exists()                                    # le verrou du bot n'est pas touché

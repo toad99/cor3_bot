@@ -392,6 +392,13 @@ v1.25.71 ✅ (relevé `ws_dump` du 21/10 à 23:44) :
 - Retour : « Payer et ouvrir » (`ExpeditionsEventContainerButton`, `open.container`) puis « Tout récupérer »
   (`ExpeditionsClaimFooter`, `collect.all`) : **c'est à « Tout récupérer » que le solde est débité**. Butin à
   récupérer sous 24 h.
+- **Renommée** (guide de la communauté, v1.18.80 du 24/04) : **une expédition réussie rapporte +10** (un job : +3,
+  confirmé en direct, § 2). Mercenaire ou drone ❓ : à vérifier avec `--bilan` (source « mercs »).
+- **Drone personnel** ❓ (onglet « Drone personnel » des Expéditions, salle `drone-missions` → `get.active` à la
+  connexion) : construit par la quête Wings of Mars (15 étapes, puis une expédition d'essai). D'après le guide, il ne
+  peut pas être détruit pour de bon et il lui faut au moins 1 de durabilité et 1 de batterie pour partir ; butin
+  « Surface of Mars » (jusqu'à 42 447 CR l'objet). Écran, trames, coût, durée et recharge : à relever
+  (`tools/ws_dump.py --dom`).
 
 ## 12. Pièges rencontrés pendant l'inspection
 

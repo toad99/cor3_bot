@@ -3,13 +3,15 @@
 
   python tools/ws_dump.py --minutes 10            trames WebSocket décodées -> logs/ws_dump_<date>.jsonl
   python tools/ws_dump.py --rooms market,sai      seulement certaines salles
-  python tools/ws_dump.py --dom                   + inventaire des sélecteurs stables à la fin (logs/dom_<date>.json) :
+  python tools/ws_dump.py --dom                   + inventaire des sélecteurs stables et HTML de l'écran à la fin
+                                                  (logs/dom_<date>.json, logs/dom_<date>.html) :
                                                   laisse alors la fenêtre ouverte sur l'écran voulu jusqu'au bout
 
 Ouvre cor3.gg dans le profil Chrome dédié du bot (config.toml) : joue normalement dans cette fenêtre,
 puis ferme-la (ou attends la fin du minutage). Rien n'est cliqué à ta place.
 Les clés qui ressemblent à un secret (token, jwt, password, auth…) et les chaînes JWT sont masquées
-avant écriture. Ferme cor3.gg ailleurs : une seule session par compte.
+avant écriture. Ferme cor3.gg ailleurs : une seule session par compte. Prend le verrou du bot
+(cor3_bot.lock) : les tâches planifiées passent leur tour ou attendent pendant l'enregistrement.
 """
 from __future__ import annotations
 
@@ -17,6 +19,7 @@ import argparse
 import datetime as dt
 import json
 import logging
+import os
 import re
 import sys
 from pathlib import Path
@@ -94,6 +97,20 @@ def main(argv: list[str] | None = None) -> int:
     log = logging.getLogger("cor3-dump")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     rooms = {r.strip() for r in args.rooms.split(",") if r.strip()}
+    lock = cor3_bot.ROOT / "cor3_bot.lock"
+    if cor3_bot.lock_busy(lock):
+        log.error("Le bot tourne en ce moment (%s) : relance quand il a fini.", lock)
+        return 2
+    lock.write_text(json.dumps({"pid": os.getpid(), "started": dt.datetime.now().isoformat(timespec="seconds"),
+                                "auto": False, "ws_dump": True}), encoding="utf-8")
+    try:
+        return record(args, gen, log, log_dir, stamp, out_path, rooms)
+    finally:
+        lock.unlink(missing_ok=True)
+
+
+def record(args: argparse.Namespace, gen: dict, log: logging.Logger, log_dir: Path, stamp: str, out_path: Path,
+           rooms: set[str]) -> int:
 
     from playwright.sync_api import Error as PWError
     from playwright.sync_api import sync_playwright
@@ -115,7 +132,9 @@ def main(argv: list[str] | None = None) -> int:
             dom_path = log_dir / f"dom_{stamp}.json"
             dom_path.write_text(json.dumps(page.evaluate(DOM_INVENTORY_JS), ensure_ascii=False, indent=1),
                                 encoding="utf-8")
-            log.info("Inventaire des sélecteurs : %s", dom_path)
+            html_path = log_dir / f"dom_{stamp}.html"
+            html_path.write_text(JWT.sub("<jwt masqué>", page.content()), encoding="utf-8")
+            log.info("Inventaire des sélecteurs : %s ; HTML de l'écran : %s", dom_path, html_path)
         try:
             ctx.close()
         except PWError:
