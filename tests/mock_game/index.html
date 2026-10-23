@@ -85,7 +85,8 @@ function openGameCenter() {
   </div>`));
 }
 // Drone personnel, relevé en v1.25.71 (23/10/2026) : &drone=<batterie> (défaut 52), &dronedur=<durabilité>.
-// « Démarrer la sortie » part tout de suite (drone-missions:launch) ; une décision arrive, puis le retour
+// « Démarrer la sortie » ouvre le panneau ExpeditionsPidlDroneSideout (Lieu, Objectif) ; « Envoyer » fait partir
+// le drone (drone-missions:launch) ; une décision arrive, puis le retour
 // (drone-missions:completed) et le butin au courrier (Stash → Boîte aux lettres → Tout récupérer).
 const DRONE = {drone: {id: 'drone-1', name: 'Agatha', durability: +(params.get('dronedur') || 83), maxDurability: 100,
                isRepairing: false, isDestroyed: false},
@@ -105,7 +106,7 @@ function droneTab() {
   if (!box) return;
   if (!DRONE.activeMissionId) {
     box.innerHTML = `<div data-sentry-component="ExpeditionsPidlDroneLaunch" data-component-name="ExpeditionsPidlDroneLaunch">
-      <h2>${DRONE.drone.name}</h2><button data-sentry-component="Button" onclick="launchDrone()">Démarrer la sortie</button>
+      <h2>${DRONE.drone.name}</h2><button data-sentry-component="Button" onclick="openDroneSideout()">Démarrer la sortie</button>
       <div data-component-name="PidlDroneConditionBattery">Batterie <b>${DRONE.battery.current}</b> / 100</div>
       <button data-sentry-component="Button">Réparation</button></div>`;
     return;
@@ -124,6 +125,14 @@ function showDrone(win) {
       '<div data-sentry-component="ExpeditionsPidlDroneTab" data-component-name="ExpeditionsPidlDroneTab" id="drone-tab"></div>');
   emit('drone-missions', 'get.options', DRONE);
   droneTab();
+}
+function openDroneSideout() {
+  document.getElementById('windows').insertAdjacentHTML('beforeend', `<div data-component-name="ExpeditionsPidlDroneSideout" id="drone-sideout">
+    <div><span>Démarrer la sortie</span><button data-sentry-element="PidlDroneSideoutHeaderBtnStyled" type="button"
+      onclick="document.getElementById('drone-sideout').remove()">x</button></div>
+    <div data-component-name="CustomSelect"><button data-component-name="CustomSelectTrigger">The Surface of Mars</button></div>
+    <div data-component-name="CustomSelect"><button data-component-name="CustomSelectTrigger">Surface Exploration</button></div>
+    <button type="button" onclick="document.getElementById('drone-sideout').remove(); launchDrone()">Envoyer</button></div>`);
 }
 function launchDrone() {
   DRONE.battery.current -= 30; DRONE.activeMissionId = 'mission-1'; window.__mock_drone.launched++;

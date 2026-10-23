@@ -129,6 +129,7 @@ TXT = {
     "hire_pay": r"verser un acompte|pay.*deposit|hire and",
     "drone_tab": r"Drone personnel|Personal drone",
     "drone_launch": r"Démarrer la sortie|Start sortie|Launch",
+    "drone_send": r"^\s*(Envoyer|Send)\s*$",
     "claim_all": r"^\s*(Tout récupérer|Claim all|Collect all)\s*$",
     "disconnected": r"DÉCONNECTÉ|DISCONNECTED",
 }
@@ -2574,13 +2575,27 @@ class Bot:
         win = self.window(comp("ExpeditionsApplication"))
         start = win.locator(comp("ExpeditionsPidlDroneLaunch")).locator(comp("Button")).filter(
             has_text=rx(TXT["drone_launch"])).first
-        mark = self.events.mark()
         self.safe_click(start)
+        # v1.25.71 (23/10) : « Démarrer la sortie » ouvre un panneau (Lieu, Objectif, Infos sortie) ;
+        # le drone part à « Envoyer ».
+        sideout = self.page.locator(cname("ExpeditionsPidlDroneSideout"))
+        sideout.wait_for(timeout=10000)
+        for idx, name in ((0, loc.get("name")), (1, mission.get("name"))):
+            trigger = sideout.locator(cname("CustomSelectTrigger")).nth(idx)
+            if name and trigger.count() and name not in trigger.inner_text():
+                trigger.click()
+                self.page.get_by_text(name, exact=True).last.click()
+                self.pause(500)
+        mark = self.events.mark()
+        self.safe_click(sideout.get_by_role("button", name=rx(TXT["drone_send"])).first)
         try:
             ev = self.wait_event("drone-missions", "launch", mark, timeout=12)
         except StepFailed:
             self.snapshot("drone_depart")
-            raise StepFailed("« Démarrer la sortie » cliqué, mais le drone n'est pas parti : écran à relever "
+            close = sideout.locator('[data-sentry-element="PidlDroneSideoutHeaderBtnStyled"]')
+            if close.count():
+                self.safe_click(close.first)
+            raise StepFailed("« Envoyer » cliqué, mais le drone n'est pas parti : écran à relever "
                              "(logs/debug/*drone_depart*)")
         started = ev.data if isinstance(ev.data, dict) else {}
         self.log.info("Drone lancé : %s, risque %s, %s de batterie, retour vers %s", mission.get("name"),

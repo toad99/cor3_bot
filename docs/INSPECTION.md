@@ -429,8 +429,11 @@ v1.25.71 ✅ (relevé `ws_dump` du 21/10 à 23:44) :
 - **FULL_SUCCESS sans Renommée non plus** ✅ (23/10, 06:15 : 107/900 avant et après).
 - Écran ✅ (`ws_dump --dom` du 23/10, 05:53–06:16) : fenêtre Expéditions, onglet `ExpeditionsTabItem` « Drone
   personnel » (envoie `drone-missions:get.options`) → `ExpeditionsPidlDroneTab`. Sans mission :
-  `ExpeditionsPidlDroneLaunch` avec deux `Button` : « Démarrer la sortie » (départ direct ❓ : 30 s entre l'ouverture
-  et `launch`, aucune trame entre les deux) et « Réparation » (écran jamais relevé) ; état dans
+  `ExpeditionsPidlDroneLaunch` avec deux `Button` : « Démarrer la sortie » et « Réparation » (écran jamais relevé).
+  ✅ (23/10, 07:09, premier essai du bot) **« Démarrer la sortie » ouvre un panneau** `ExpeditionsPidlDroneSideout`
+  (fermeture `PidlDroneSideoutHeaderBtnStyled`) : durabilité, batterie, `CustomSelectTrigger` Lieu puis Objectif,
+  « Infos sortie » (risque, durée, consommation) et un `<button>` « Envoyer » sans attribut : c'est lui qui envoie
+  `event:launch`. Sans trame à l'ouverture du panneau ; état dans
   `PidlDroneConditionDurability` / `PidlDroneConditionBattery` (`data-onboarding-300-id` aussi), modules
   `PidlDroneModuleSlot`. En mission : `ExpeditionsPidlDroneActiveMission`, minuteur `ExpeditionsProgressTimer`,
   événements `ExpeditionsPidlDroneActiveEvents` → `ExpeditionsEventCard` (`data-onboarding-300-id`
