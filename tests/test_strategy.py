@@ -131,6 +131,21 @@ def test_hopeless_decrypt_is_lost_not_retried_and_keeps_the_fuse(tmp_path):
     assert "decrypt-1" not in state.pending_jobs() and state.job_lost("decrypt-1")
 
 
+def test_unreadable_extension_is_refused_before_signing(tmp_path):
+    """23/10 : .xvct signé, mais « big decrypt » ne le lit pas (pas de bouton Déchiffrer). Les contrats .xvct
+    suivants sont refusés, tant que la config envoie .xvct vers ce préréglage."""
+    bot, state, _ = make_bot(tmp_path)
+    xvct = job("dec-xvct", "DecryptFile", 1500)
+    xvct["conditions"] = {"items": [{"type": "DecryptFile", "details": {
+        "extensions": [{"ext": ".xvct", "encryptionLevel": [22, 27]}], "encryptionLevel": [22, 27]}}]}
+    bot.cfg["jobs"]["decrypt_presets"] = {"eb52x": "decrypt", "default": "big decrypt"}
+    assert bot.decrypt_problem(xvct) is None
+    state.note_unreadable("xvct", "big decrypt")
+    assert "illisible" in bot.job_refusal_reason(xvct)
+    bot.cfg["jobs"]["decrypt_presets"]["xvct"] = "lyapun"           # nouveau module, nouveau préréglage
+    assert bot.decrypt_problem(xvct) is None
+
+
 def test_over_defended_server_is_refused_before_signing(tmp_path):
     """22/10 : SRM7-M défense 24, meilleur outil 19 : le contrat ne doit pas être signé."""
     bot, state, _ = make_bot(tmp_path)

@@ -225,7 +225,10 @@ v1.25.71 ✅ (relevé `ws_dump` du 21/10 à 23:44) :
 - 22/10 de 04:10 à 04:20 ✅ : 5 déchiffrements ICE WALL réussis (4 sur Home Server, `.eb52x [4, 10]` et `.ab52p [7, 15]` ;
   1 sur D4RK, `.eb52x [14, 25]`), 2 IP Injection, 2 Data Download, 2 Log Deletion, puis plus tôt 2 File
   Elimination. Échec « module trop faible » : `.xvct [22, 27]` (SRM7-M) avec « big decrypt » → pas de bouton
-  Déchiffrer. Le bot classe alors le job perdu (`Hopeless`, `lost_jobs` dans `state.json`) et n'y retouche plus. Le nom ne
+  Déchiffrer. Le bot classe alors le job perdu (`Hopeless`, `lost_jobs` dans `state.json`) et n'y retouche plus.
+  Revu le 23/10 à 11:56 (même cas, 2e job perdu) : le bot retient l'extension (`unreadable` : `{"xvct": "big decrypt"}`)
+  et refuse ensuite ces contrats avant de les signer, l'extension étant déjà dans `details.extensions` de l'offre
+  (`decrypt_problem`). Après un achat de module : nouveau préréglage dans `decrypt_presets`, ou retirer la ligne. Le nom ne
   suffit pas à reconnaître un job : « Data Download » existe aussi avec un type géré (URM7-M), seul `jobType` compte.
 - v1.25.71 ✅ (relevé `ws_dump` du 21/10) : `conditions = {hasDeposit, hasRepFine, serverConfigId, items[]}`,
   chaque élément `{type, label, isPrimary, subsystem, details}`. La tâche principale a `isPrimary: true` et

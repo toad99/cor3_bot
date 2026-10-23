@@ -332,6 +332,15 @@ class State:
         if value > float(self.data.get("hack_power") or 0):
             self.data["hack_power"] = value
 
+    def note_unreadable(self, ext: str, preset: str) -> None:
+        """Extension que ce préréglage ne sait pas lire (pas de bouton Déchiffrer) : refuser d'avance ces contrats
+        tant que la config envoie l'extension vers ce préréglage. Après un achat de module : retirer la ligne
+        de « unreadable » dans state.json."""
+        self.data.setdefault("unreadable", {})[ext] = preset
+
+    def unreadable_by(self, ext: str) -> str | None:
+        return (self.data.get("unreadable") or {}).get(ext)
+
     def mark_job_lost(self, job_id: Any) -> None:
         """Job signé impossible à finir : ne plus jamais le retenter (il expirera tout seul)."""
         self.clear_job_pending(job_id)
@@ -1549,6 +1558,8 @@ class Bot:
             return problem
         if problem := self.access_problem(job):
             return problem
+        if problem := self.decrypt_problem(job):
+            return problem
         return None
 
     def access_problem(self, job: dict) -> str | None:
@@ -1717,6 +1728,21 @@ class Bot:
             self.apply_preset(name)
 
     # ----- Déchiffrement (ICE WALL Break) ------------------------------------
+    def decrypt_preset(self, ext: str) -> str:
+        presets = self.cfg["jobs"].get("decrypt_presets", {})
+        return presets.get(ext, presets.get("default", "decrypt"))
+
+    def decrypt_problem(self, job: dict) -> str | None:
+        """Fichier qu'un préréglage n'a déjà pas su lire (state.json « unreadable ») : on ne signe pas."""
+        if self.state is None:
+            return None
+        for e in self.job_details(job).get("extensions") or []:
+            ext = str(e.get("ext") or "").lstrip(".").lower() if isinstance(e, dict) else ""
+            if ext and self.state.unreadable_by(ext) == self.decrypt_preset(ext):
+                return (f"fichier .{ext} illisible par le préréglage « {self.decrypt_preset(ext)} » "
+                        "(déjà vu : pas de bouton Déchiffrer)")
+        return None
+
     def do_decrypt_job(self, details: dict) -> None:
         files = details.get("files") or []
         if not files:
@@ -1724,8 +1750,8 @@ class Bot:
         target = files[0]
         announced = [e.get("ext") for e in details.get("extensions") or [] if isinstance(e, dict) and e.get("ext")]
         ext = (announced[0] if announced else target.get("name", "").rsplit(".", 1)[-1] or "").lstrip(".").lower()
-        presets = self.cfg["jobs"].get("decrypt_presets", {})
-        self.apply_preset(presets.get(ext, presets.get("default", "decrypt")))
+        preset = self.decrypt_preset(ext)
+        self.apply_preset(preset)
 
         self.close_all_windows()
         shortcut = self.page.locator(comp("DesktopShortcutComponent")).filter(has_text=rx(r"^\s*Downloads\s*$")).first
@@ -1754,8 +1780,11 @@ class Bot:
             if self.dry_run:
                 self.log.info("[SIMULATION] pas de bouton Déchiffrer (le préréglage n'a pas été appliqué)")
                 return
-            raise Hopeless("pas de bouton Déchiffrer avec ce préréglage : module trop faible pour ce fichier "
-                           f"(niveau {details.get('encryptionLevel')}), job perdu")
+            if self.state is not None and ext:
+                self.state.note_unreadable(ext, preset)     # 23/10 : .xvct avec « big decrypt » (5CRYPt0L 0J)
+            raise Hopeless(f"pas de bouton Déchiffrer avec ce préréglage : son module ne lit pas .{ext} ou est trop "
+                           f"faible (niveau {details.get('encryptionLevel')}), job perdu ; ces contrats seront "
+                           "refusés d'avance")
         text = analysis.inner_text()
         level = re.search(r"(?:NIVEAU DE CHIFFREMENT|ENCRYPTION LEVEL)\s*([\d.]+)", text, re.I)
         power = re.search(r"(?:PUISSANCE DE D[ÉE]CHIFFREMENT|DECRYPTION POWER)\s*([\d.]+)", text, re.I)
