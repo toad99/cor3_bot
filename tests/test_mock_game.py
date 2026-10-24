@@ -499,10 +499,46 @@ def test_drone_waits_for_its_battery(make_bot, tmp_path):
 
 def test_drone_low_durability_and_dry_run(make_bot):
     bot = make_bot(extra="&dronedur=20", jobs=None)
-    bot.cfg["drone"] = {"repair_below": 50}
+    bot.cfg["drone"] = {"repair_below": 50, "min_durability": 30}
     summary = bot.run_drone()
     assert "pas de départ : durabilité 20 < min_durability" in summary
     assert "drone à réparer : durabilité 20 < repair_below (16000 CR" in summary
     bot = make_bot(dry_run=True)
     assert "simulation : drone non lancé" in bot.run_drone()
     assert bot.page.evaluate("window.__mock_drone")["launched"] == 0
+
+
+def test_drone_repaired_while_charging(make_bot, tmp_path):
+    """24/10 : réparer pendant la recharge, juste ce qui finit avant que la batterie suffise, jusqu'à
+    repair_target et sous max_repair_cr. Batterie 10 : 20 points manquent, 2 h 24, soit 43 points de 200 s."""
+    state = cor3_bot.State(tmp_path / "state.json")
+    bot = make_bot(extra="&drone=10&dronedur=12", state=state)
+    bot.cfg["drone"] = {"repair_while_charging": True, "repair_target": 26, "max_repair_cr": 5000}
+    summary = bot.run_drone()
+    m = bot.page.evaluate("window.__mock_drone")
+    assert m["launched"] == 0 and m["repairs"] == [26], summary
+    assert "drone réparé 12 → 26 (2800 CR)" in summary
+    assert state.drone_due(cor3_bot.utc_now() + dt.timedelta(hours=2, minutes=30))
+
+
+def test_drone_repair_plan(tmp_path):
+    """Plafond de CR, temps de recharge, réparation déjà en cours, drone qui peut partir tout de suite."""
+    cfg = {"general": {}, "daily": {}, "markets": {}, "mercenaries": {}, "notify": {}, "auto": {}, "jobs": {},
+           "drone": {"repair_target": 26, "max_repair_cr": 5000}}
+    bot = cor3_bot.Bot(None, cfg, logging.getLogger("t"), cor3_bot.GameEvents(logging.getLogger("t")), False, None)
+
+    def opts(dur, battery, **drone):
+        return {"drone": {"durability": dur, "maxDurability": 100, **drone},
+                "battery": {"current": battery, "restorePerHour": 8.33},
+                "repairRate": {"creditsPerPoint": 200, "secondsPerPoint": 200},
+                "locations": [{"missions": [{"batteryCost": 30}]}]}
+
+    assert bot.repair_plan(opts(12, 10)) == (26, 2800)
+    assert bot.repair_plan(opts(12, 29)) == (14, 400)          # 1 point de batterie : 7 min, 2 points
+    assert bot.repair_plan(opts(12, 30)) is None               # il part tout de suite
+    assert bot.repair_plan(opts(26, 0)) is None                # déjà au niveau visé
+    assert bot.repair_plan(opts(12, 0, isRepairing=True)) is None
+    cfg["drone"]["max_repair_cr"] = 1000
+    assert bot.repair_plan(opts(0, 0)) == (5, 1000)            # plafond
+    cfg["drone"]["max_repair_cr"] = 5000
+    assert bot.repair_plan(opts(0, 80)) == (25, 5000)          # durabilité 0 : sans attendre la batterie

@@ -18,7 +18,7 @@ Ce que le bot sait de l'interface : `docs/INSPECTION.md` ; comment l'inspecter �
 | Serveurs | Connexion par l'accès « par tâche », sinon par ton outil de piratage : **repiratage automatique après une maintenance** (direct ou ICE WALL) ; serveurs en maintenance ou injoignables évités et retentés plus tard | activé (`allow_hack`) |
 | Jobs destructifs | IP Cleanup, Log Deletion, File Elimination, IP Injection | **désactivés** (`allow_deletions`, `allow_ip_add`) |
 | `mercs` | Suivi d'une expédition en cours (jusqu'à `watch_minutes`), réponse aux événements (prudent / gourmand / auto) | activé (ne dépense rien) |
-| `drone` | Drone personnel : récupère le butin au courrier, lance une mission dès que la batterie le permet (30 sur 100, recharge 8,33/h), reste jusqu'au retour (20 min) pour répondre aux événements (prudent / gourmand / auto) ; ne part pas sous `min_durability` ; ne répare jamais (`repair_below` ne fait qu'alerter) | désactivé (`[drone] enabled`) |
+| `drone` | Drone personnel : récupère le butin au courrier, lance une mission dès que la batterie le permet (30 sur 100, recharge 8,33/h), reste jusqu'au retour (20 min) pour répondre aux événements (prudent / gourmand / auto) ; ne part pas sous `min_durability` ; répare pendant la recharge si `repair_while_charging` (jusqu'à `repair_target`, au plus `max_repair_cr` CR) | désactivé (`[drone] enabled`) |
 | Dépenses | Engager un mercenaire, payer le solde au retour ; « force hack » : jamais | **désactivées** (`hire`, `pay_on_return`) |
 
 Chaque action qui valide quelque chose passe par un point de contrôle : en `--dry-run`, le script s'arrête

@@ -100,7 +100,7 @@ const DECISION = {eventId: 'ev-2', type: 'DECISION', message: 'An old emergency 
     {id: 'opt-ignore', label: 'Ignore it', effect: {riskDelta: 0, lootDelta: 0}, requiredModuleId: null},
     {id: 'opt-remote', label: 'Scan remotely', effect: {riskDelta: 0, lootDelta: 0.5}, requiredModuleId: 'mod-x'}]};
 const MAIL = [];
-window.__mock_drone = {launched: 0, resolved: [], claimed: 0};
+window.__mock_drone = {launched: 0, resolved: [], claimed: 0, repairs: []};
 function droneTab() {
   const box = document.getElementById('drone-tab');
   if (!box) return;
@@ -108,7 +108,7 @@ function droneTab() {
     box.innerHTML = `<div data-sentry-component="ExpeditionsPidlDroneLaunch" data-component-name="ExpeditionsPidlDroneLaunch">
       <h2>${DRONE.drone.name}</h2><button data-sentry-component="Button" onclick="openDroneSideout()">Démarrer la sortie</button>
       <div data-component-name="PidlDroneConditionBattery">Batterie <b>${DRONE.battery.current}</b> / 100</div>
-      <button data-sentry-component="Button">Réparation</button></div>`;
+      <button data-sentry-component="Button" onclick="openRepair()">Réparation</button></div>`;
     return;
   }
   box.innerHTML = `<div data-sentry-component="ExpeditionsPidlDroneActiveMission" data-component-name="ExpeditionsPidlDroneActiveMission">
@@ -133,6 +133,32 @@ function openDroneSideout() {
     <div data-component-name="CustomSelect"><button data-component-name="CustomSelectTrigger">The Surface of Mars</button></div>
     <div data-component-name="CustomSelect"><button data-component-name="CustomSelectTrigger">Surface Exploration</button></div>
     <button type="button" onclick="document.getElementById('drone-sideout').remove(); launchDrone()">Envoyer</button></div>`);
+}
+// Réparation (relevé le 24/10, ws_dump et code du jeu) : panneau à curseur (durabilité actuelle + 1 .. max,
+// arrondi de la position du clic), bouton « Réparation » du bas → event:repair {targetDurability}.
+function openRepair() {
+  const d = DRONE.drone; let target = d.maxDurability;
+  document.getElementById('windows').insertAdjacentHTML('beforeend', `<div data-component-name="ExpeditionsPidlDroneSideout"
+    data-onboarding-300-id="PidlDroneRepairBody" id="repair-sideout" style="width:420px">
+    <div><span>Réparation</span><button data-sentry-element="PidlDroneSideoutHeaderBtnStyled" type="button"
+      onclick="document.getElementById('repair-sideout').remove()">x</button></div>
+    <div data-sentry-element="PidlDroneRepairSliderTrackStyled" id="repair-track" style="width:300px;height:8px;margin:20px;background:#333"></div>
+    <span data-sentry-element="PidlDroneRepairSliderBubbleStyled" id="repair-bubble">${target}</span>
+    <button type="button" id="repair-go">Réparation</button></div>`);
+  document.getElementById('repair-track').addEventListener('pointerdown', ev => {
+    const r = ev.currentTarget.getBoundingClientRect();
+    const o = Math.round(Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width)) * d.maxDurability);
+    target = Math.max(d.durability + 1, Math.min(d.maxDurability, o));
+    document.getElementById('repair-bubble').textContent = target;
+  });
+  document.getElementById('repair-go').onclick = () => {
+    const cost = (target - d.durability) * 200;
+    window.__mock_drone.repairs.push(target);
+    d.isRepairing = true; d.repairSecondsRemaining = cost;
+    d.repair = {startDurability: d.durability, targetDurability: target, totalSeconds: cost, secondsRemaining: cost, cost};
+    document.getElementById('repair-sideout').remove();
+    emit('drone-missions', 'repair', DRONE);
+  };
 }
 function launchDrone() {
   DRONE.battery.current -= 30; DRONE.activeMissionId = 'mission-1'; window.__mock_drone.launched++;

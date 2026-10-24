@@ -158,3 +158,29 @@ def test_over_defended_server_is_refused_before_signing(tmp_path):
     assert state.data["hack_power"] == 19
     bot.events.servers["b"]["serverDefenceRate"] = 15
     assert bot.access_problem(acquisition) is None
+
+
+def test_extension_no_owned_software_reads_is_refused_before_signing(tmp_path):
+    """24/10 : .12vvsh signé et perdu (« Aucun programme compatible installé »). loadout:get.options donne les
+    extensions de chaque logiciel possédé : Cypher+ (.eb52x, .ab52p), 5CRYPt0L 0J (.eb54x, .jjqv)."""
+    bot, state, _ = make_bot(tmp_path)
+
+    def contract(ext):
+        j = job(f"dec-{ext}", "DecryptFile", 1260)
+        j["conditions"] = {"items": [{"type": "DecryptFile", "details": {
+            "extensions": [{"ext": f".{ext}", "encryptionLevel": [20, 24]}]}}]}
+        return j
+
+    assert bot.decrypt_problem(contract("12vvsh")) is None          # logiciels encore inconnus : on tente
+    bot.events._on_frame("in", cor3_bot.msgpack.packb({"data": ["loadout", {
+        "event": {"action": "get.options"}, "data": {"ownedSoftware": [
+            {"name": "Cypher+ v1.4", "specs": [{"type": "DECRYPT", "fileTypes": [".eb52x", ".ab52p"]}]},
+            {"name": "Porter-lite r4", "specs": [{"type": "HACK", "serverTypes": ["CEDRT public"]}]},
+            {"name": "5CRYPt0L 0J", "specs": [{"type": "DECRYPT", "fileTypes": [".eb54x", ".jjqv"]}]}]}}]}))
+    assert "aucun de tes logiciels" in bot.job_refusal_reason(contract("12vvsh"))
+    assert bot.decrypt_problem(contract("eb54x")) is None
+    assert bot.decrypt_problem(contract("ab52p")) is None
+    bot.events.readable = None                                      # passage suivant : gardé dans state.json
+    state.save()
+    bot.state = cor3_bot.State(tmp_path / "state.json")
+    assert "aucun de tes logiciels" in bot.decrypt_problem(contract("xvct"))

@@ -75,13 +75,18 @@ hire_market = "Home Server"  # marché où engager (onglet Engager)
 enabled = false
 event_policy = "gourmand" # prudent = moindre risque | gourmand = plus de butin si risque <= max | auto = laisser le jeu choisir
 max_risk_delta = 0.15     # gourmand : hausse de risque acceptée pour un événement (0.15 = +15 %)
-min_durability = 30       # pas de départ en dessous (un échec coûte 25 de durabilité)
+min_durability = 1        # pas de départ en dessous. 1 = le minimum du jeu : la durabilité ne change pas le risque
+                          # (relevé le 23/10 ; sorties réussies à 29 comme à 83), une sortie coûte 5 (réussite), 12 (partielle) ou
+                          # 25 (échec), et le drone ne peut pas être perdu pour de bon (guide)
 watch = true              # rester jusqu'au retour (20 min) pour répondre aux événements
 watch_minutes = 25
 claim_loot = true         # récupérer le butin au courrier (Stash → Tout récupérer) : gratuit
 mission = ""              # vide = la première proposée (« Surface Exploration »)
-repair_below = 0          # alerte quand la durabilité passe sous ce seuil (0 = jamais) ; la réparation
-                          # (200 CR par point) reste à faire à la main
+repair_below = 0          # alerte quand la durabilité passe sous ce seuil (0 = jamais)
+# Réparation (200 CR et 200 s par point, CR débités tout de suite, « Arrêt » ne rembourse rien) : DÉPENSE de CR.
+repair_while_charging = false  # réparer pendant la recharge, seulement ce qui finit avant que la batterie suffise
+repair_target = 26        # durabilité visée : un échec coûte 25, le drone peut donc toujours repartir
+max_repair_cr = 5000      # plafond par réparation
 
 [notify]
 windows_toast = true      # notification Windows (session ouverte requise)

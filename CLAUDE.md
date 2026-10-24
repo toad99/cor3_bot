@@ -99,4 +99,6 @@ python cor3_bot.py --auto                 # ce que fait la tâche du quart d'heu
   3 points, quel que soit son gain (relevé sur le bandeau `LevelIndicator`, § 2). Viser le nombre de jobs réussis.
   Le bot lit la Renommée à chaque passage (`note_renown`, `--bilan`), et `--auto` tourne tous les quarts d'heure.
 - Drone personnel (23/10) : missions gratuites (batterie), butin au courrier, **aucune Renommée** (succès partiel
-  ou complet). Le joueur veut les objets : `run_drone` part dès que possible, mode gourmand, ne répare jamais.
+  ou complet). Le joueur veut les objets : `run_drone` part dès que possible, mode gourmand. 24/10 : `min_durability` 1 (la
+  durabilité ne change pas le risque) et, avec l'accord du joueur, réparation pendant la recharge
+  (`repair_while_charging`, jusqu'à 26, 5 000 CR au plus). « Arrêt » d'une réparation ne rembourse rien : jamais.

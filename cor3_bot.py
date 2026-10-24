@@ -130,6 +130,7 @@ TXT = {
     "drone_tab": r"Drone personnel|Personal drone",
     "drone_launch": r"Démarrer la sortie|Start sortie|Launch",
     "drone_send": r"^\s*(Envoyer|Send)\s*$",
+    "drone_repair": r"^\s*(Réparation|Réparer|Repair)\s*$",
     "claim_all": r"^\s*(Tout récupérer|Claim all|Collect all)\s*$",
     "take_all": r"^\s*(Tout prendre|Take all)\s*$",
     "disconnected": r"DÉCONNECTÉ|DISCONNECTED",
@@ -340,6 +341,14 @@ class State:
 
     def unreadable_by(self, ext: str) -> str | None:
         return (self.data.get("unreadable") or {}).get(ext)
+
+    def note_readable(self, exts: list[str]) -> None:
+        """Extensions que les logiciels possédés savent déchiffrer (loadout:get.options, `specs[].fileTypes`),
+        gardées d'un passage à l'autre : le Loadout n'est ouvert qu'après la signature."""
+        self.data["readable"] = list(exts)
+
+    def readable(self) -> list[str] | None:
+        return self.data.get("readable")
 
     def mark_job_lost(self, job_id: Any) -> None:
         """Job signé impossible à finir : ne plus jamais le retenter (il expirera tout seul)."""
@@ -564,6 +573,7 @@ class GameEvents:
         self.session_lost = False
         self.frontend_version: str | None = None
         self.servers: dict[str, dict] = {}      # id -> serveur (carte du réseau, tenu à jour)
+        self.readable: list[str] | None = None  # extensions que les logiciels possédés déchiffrent (Loadout)
 
     def attach(self, page: Page) -> None:
         page.on("websocket", self._on_websocket)
@@ -603,6 +613,12 @@ class GameEvents:
             self.frontend_version = body.get("frontendVersion")
         if room == "network-map" and direction == "in" and isinstance(payload_data, dict):
             self._merge_map(payload_data)
+        if (room == "loadout" and action == "get.options" and direction == "in" and isinstance(payload_data, dict)
+                and isinstance(payload_data.get("ownedSoftware"), list)):
+            self.readable = sorted({str(ext).lstrip(".").lower()
+                                    for soft in payload_data["ownedSoftware"] if isinstance(soft, dict)
+                                    for spec in soft.get("specs") or [] if isinstance(spec, dict)
+                                    and spec.get("type") == "DECRYPT" for ext in spec.get("fileTypes") or []})
         self._push(direction, room, action, payload_data)
 
     def _merge_map(self, data: dict) -> None:
@@ -1733,11 +1749,18 @@ class Bot:
         return presets.get(ext, presets.get("default", "decrypt"))
 
     def decrypt_problem(self, job: dict) -> str | None:
-        """Fichier qu'un préréglage n'a déjà pas su lire (state.json « unreadable ») : on ne signe pas."""
+        """Fichier qu'aucun logiciel possédé ne lit (state.json « readable »), ou qu'un préréglage n'a déjà pas su
+        lire (« unreadable ») : on ne signe pas. 24/10 : .12vvsh et .xvct ne se lisent qu'avec Lyapun AA8."""
         if self.state is None:
             return None
+        if self.events.readable is not None:
+            self.state.note_readable(self.events.readable)
+        readable = self.state.readable()
         for e in self.job_details(job).get("extensions") or []:
             ext = str(e.get("ext") or "").lstrip(".").lower() if isinstance(e, dict) else ""
+            if ext and readable is not None and ext not in readable:
+                return (f"fichier .{ext} : aucun de tes logiciels ne le déchiffre "
+                        f"(ils lisent {', '.join('.' + r for r in readable) or 'rien'})")
             if ext and self.state.unreadable_by(ext) == self.decrypt_preset(ext):
                 return (f"fichier .{ext} illisible par le préréglage « {self.decrypt_preset(ext)} » "
                         "(déjà vu : pas de bouton Déchiffrer)")
@@ -2426,8 +2449,8 @@ class Bot:
     # =========================================================================
     def run_drone(self) -> str:
         """Récupère le butin au courrier, lance une mission dès que la batterie le permet et, si `watch`,
-        reste jusqu'au retour pour répondre aux événements. Une mission ne coûte que de la batterie ;
-        la réparation (CR) n'est jamais faite par le bot (`repair_below` ne fait qu'alerter)."""
+        reste jusqu'au retour pour répondre aux événements. Une mission ne coûte que de la batterie ; la
+        réparation (CR) seulement si `repair_while_charging`, pendant la recharge (`repair_drone`)."""
         dcfg = self.cfg["drone"]
         watch, minutes = dcfg.get("watch", True), float(dcfg.get("watch_minutes", 25))
         self.ensure_connected()
@@ -2457,6 +2480,9 @@ class Bot:
                 opts = self.open_drone()
             elif mission:
                 opts = {**opts, "activeMissionId": mission.get("id")}
+            if not opts.get("activeMissionId") and dcfg.get("repair_while_charging", False):
+                note, opts = self.repair_drone(opts)
+                notes.append(note)
             notes.append(self.drone_repair_note(opts))
         finally:
             try:
@@ -2469,6 +2495,94 @@ class Bot:
                 if why:
                     notes.append(why)
         return "; ".join(n for n in notes if n) or "rien à faire"
+
+    def repair_plan(self, opts: dict) -> tuple[int, int] | None:
+        """Réparation à lancer pendant la recharge : (durabilité visée, coût en CR), ou None.
+        Elle doit finir avant que la batterie suffise (le drone ne part pas en réparation, et « Arrêt » ne
+        rembourse rien), monte au plus à `repair_target` (26 par défaut : un échec coûte 25, le drone peut
+        toujours repartir) et coûte au plus `max_repair_cr`. Sous `min_durability`, le drone ne peut pas partir :
+        on répare sans attendre la batterie."""
+        dcfg = self.cfg["drone"]
+        drone, battery = opts.get("drone") or {}, opts.get("battery") or {}
+        if not drone or drone.get("isDestroyed") or drone.get("isRepairing") or opts.get("activeMissionId"):
+            return None
+        rate = opts.get("repairRate") or {}
+        per_point = int(rate.get("creditsPerPoint") or 200)
+        secs_point = int(rate.get("secondsPerPoint") or 200)
+        durability = int(drone.get("durability") or 0)
+        target = min(int(dcfg.get("repair_target", 26)), int(drone.get("maxDurability") or 100))
+        points = min(target - durability, int(dcfg.get("max_repair_cr", 0) or 0) // per_point)
+        if durability >= int(dcfg.get("min_durability", 1)):
+            costs = [int(m.get("batteryCost") or 0) for loc in opts.get("locations") or []
+                     for m in loc.get("missions") or []]
+            missing = min(costs or [30]) - float(battery.get("current") or 0)
+            per_hour = float(battery.get("restorePerHour") or 8.33) or 8.33
+            points = min(points, int(missing / per_hour * 3600 // secs_point) if missing > 0 else 0)
+        if points < 1:
+            return None
+        return durability + points, points * per_point
+
+    def repair_drone(self, opts: dict) -> tuple[str, dict]:
+        """« Réparation » → panneau ExpeditionsPidlDroneRepairModal (curseur de la durabilité visée, de la
+        durabilité actuelle + 1 au maximum, 100 par défaut) → bouton « Réparation » du bas : event:repair
+        {targetDurability}, CR débités tout de suite (relevé le 24/10, ws_dump et code du jeu)."""
+        plan = self.repair_plan(opts)
+        if plan is None:
+            return "", opts
+        target, cost = plan
+        drone = opts.get("drone") or {}
+        if not self.allowed(f"réparer le drone {drone.get('name')} : durabilité {drone.get('durability')} → "
+                            f"{target} pour {cost} CR"):
+            return f"simulation : drone non réparé ({drone.get('durability')} → {target}, {cost} CR)", opts
+        win = self.window(comp("ExpeditionsApplication"))
+        button = win.locator(comp("ExpeditionsPidlDroneLaunch")).locator(comp("Button")).filter(
+            has_text=rx(TXT["drone_repair"])).first
+        self.safe_click(button)
+        panel = self.page.locator('[data-onboarding-300-id="PidlDroneRepairBody"]')
+
+        def close() -> None:
+            btn = panel.locator('[data-sentry-element="PidlDroneSideoutHeaderBtnStyled"]')
+            if btn.count():
+                self.safe_click(btn.first)
+
+        panel.wait_for(timeout=10000)
+        track = panel.locator('[data-sentry-element="PidlDroneRepairSliderTrackStyled"]').first
+        bubble = panel.locator('[data-sentry-element="PidlDroneRepairSliderBubbleStyled"]').first
+        top = int(drone.get("maxDurability") or 100)
+        chosen = None
+        for _ in range(4):           # le jeu arrondit la position du clic : on corrige d'après la bulle
+            box = track.bounding_box()
+            if not box:
+                break
+            ratio = (target if chosen is None else 2 * target - chosen) / top
+            self.page.mouse.click(box["x"] + box["width"] * max(0.0, min(1.0, ratio)), box["y"] + box["height"] / 2)
+            self.pause(300)
+            found = re.search(r"\d+", bubble.inner_text())
+            chosen = int(found.group()) if found else None
+            if chosen == target:
+                break
+        if chosen != target:
+            close()
+            raise StepFailed(f"curseur de réparation sur {chosen} au lieu de {target} : rien n'a été dépensé")
+        mark = self.events.mark()
+        self.safe_click(panel.get_by_role("button", name=rx(TXT["drone_repair"])).last)
+        try:
+            ev = self.wait_event("drone-missions", "repair", mark, timeout=15)
+        except StepFailed:
+            self.snapshot("drone_reparation")
+            close()
+            raise StepFailed("« Réparation » cliqué, mais aucune réponse du jeu : écran à relever "
+                             "(logs/debug/*drone_reparation*)")
+        data = ev.data if isinstance(ev.data, dict) else {}
+        repair = (data.get("drone") or {}).get("repair") or {}
+        paid = repair.get("cost")
+        self.log.info("Drone en réparation : %s → %s, %s CR, fin dans %s s", repair.get("startDurability"),
+                      repair.get("targetDurability"), paid, repair.get("totalSeconds"))
+        if paid is not None and int(paid) > cost:
+            raise StepFailed(f"réparation payée {paid} CR au lieu de {cost} : à vérifier (ne pas cliquer « Arrêt », "
+                             "rien n'est remboursé)")
+        return f"drone réparé {drone.get('durability')} → {target} ({paid if paid is not None else cost} CR)", \
+            {**opts, **{k: v for k, v in data.items() if k in ("drone", "battery")}}
 
     def drone_repair_note(self, opts: dict) -> str:
         """`repair_below` (0 = jamais) : alerte quand la durabilité passe sous le seuil. L'écran de réparation
@@ -2597,7 +2711,7 @@ class Bot:
             return "pas de départ : drone " + ("détruit" if drone.get("isDestroyed") else "en réparation"), None
         if int(battery.get("current") or 0) < cost:
             return f"pas de départ : batterie {battery.get('current')} < {cost}", None
-        if durability < int(dcfg.get("min_durability", 30)):
+        if durability < int(dcfg.get("min_durability", 1)):
             return f"pas de départ : durabilité {durability} < min_durability", None
         if not self.allowed(f"lancer le drone {drone.get('name')} : {mission.get('name')} ({loc.get('name')}), "
                             f"{cost} de batterie"):
@@ -2707,16 +2821,24 @@ class Bot:
         if not drone:
             return None, ""
         dcfg = self.cfg["drone"]
-        if int(drone.get("durability") or 0) < int(dcfg.get("min_durability", 30)):
+        if drone.get("isRepairing") and drone.get("repairSecondsRemaining"):
+            done = now + dt.timedelta(seconds=float(drone["repairSecondsRemaining"]), minutes=1)
+            if int(drone.get("durability") or 0) < int(dcfg.get("min_durability", 1)):
+                return done, f"drone en réparation jusqu'à {local_time(done)}"
+        else:
+            done = None
+        if done is None and int(drone.get("durability") or 0) < int(dcfg.get("min_durability", 1)):
             later = now + dt.timedelta(hours=6)
             return later, (f"drone à réparer (durabilité {drone.get('durability')} < min_durability), "
                            f"je repasserai vers {local_time(later)}")
         costs = [int(m.get("batteryCost") or 0) for loc in opts.get("locations") or [] for m in loc.get("missions") or []]
         cost, current = min(costs or [30]), float(battery.get("current") or 0)
-        if current >= cost:
+        if current >= cost and done is None:
             return None, ""
         rate = float(battery.get("restorePerHour") or 8.33) or 8.33
-        when = now + dt.timedelta(hours=(cost - current) / rate, minutes=2)
+        when = now + dt.timedelta(hours=max(0.0, cost - current) / rate, minutes=2)
+        if done is not None and done > when:
+            return done, f"drone en réparation jusqu'à {local_time(done)}"
         return when, f"batterie {current:g}/{cost} : prochain départ vers {local_time(when)}"
 
 

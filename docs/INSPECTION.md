@@ -228,7 +228,14 @@ v1.25.71 ✅ (relevé `ws_dump` du 21/10 à 23:44) :
   Déchiffrer. Le bot classe alors le job perdu (`Hopeless`, `lost_jobs` dans `state.json`) et n'y retouche plus.
   Revu le 23/10 à 11:56 (même cas, 2e job perdu) : le bot retient l'extension (`unreadable` : `{"xvct": "big decrypt"}`)
   et refuse ensuite ces contrats avant de les signer, l'extension étant déjà dans `details.extensions` de l'offre
-  (`decrypt_problem`). Après un achat de module : nouveau préréglage dans `decrypt_presets`, ou retirer la ligne. Le nom ne
+  (`decrypt_problem`). ✅ 24/10 (`ws_dump` du 24/10, 01:37) : `loadout:get.options` donne `ownedSoftware[{name, specs[{type:
+  "DECRYPT", fileTypes, power}]}]`, donc **les extensions lisibles se savent d'avance** : Cypher+ v1.4 `.eb52x .ab52p`
+  [8, 25], 5CRYPt0L 0J `.eb54x .jjqv` [14, 46]. `.12vvsh` et `.xvct` ne se lisent qu'avec Lyapun AA8 (VolgaSoft,
+  68 800 CR, licence SOYUZ, `.eb54x .12vvsh .xvct` [20, 35]) ; 5CRYPt0L 09 lit `.eb52x .ab52p .eb54x` [14, 38]. Sans
+  logiciel compatible, l'analyse du fichier affiche « Puissance de déchiffrement 0.0 [Aucun programme compatible
+  installé] » (24/10, 05:51 : `.12vvsh` perdu sur URM7-M). Changer de préréglage n'y fait rien. Le bot garde la liste
+  (`state.json` « readable », mise à jour à chaque ouverture du Loadout) et refuse avant signature toute autre
+  extension. Après un achat de module : nouveau préréglage dans `decrypt_presets`, ou retirer la ligne. Le nom ne
   suffit pas à reconnaître un job : « Data Download » existe aussi avec un type géré (URM7-M), seul `jobType` compte.
 - v1.25.71 ✅ (relevé `ws_dump` du 21/10) : `conditions = {hasDeposit, hasRepFine, serverConfigId, items[]}`,
   chaque élément `{type, label, isPrimary, subsystem, details}`. La tâche principale a `isPrimary: true` et
@@ -457,8 +464,22 @@ v1.25.71 ✅ (relevé `ws_dump` du 21/10 à 23:44) :
   `StashHeader`) → `MailboxPanel` : « Tout récupérer » (`StashButton`, `event:claim.all` → `mail:claim.all
   {results[{attachmentId, status: "claimed"}]}`) ou « Récupérer l'objet » par `MailCard` (`claim.item`, avec la
   case du stash). ⚠️ 23/10 à 09:21 (bot) : « Tout récupérer » n'a envoyé aucune trame et a remplacé le stash par l'écran de transfert `StashLayoutDesktop` : `TransferPanel` (« Objets 2 », `LootGrid`), `InventoryPanel`, et à côté (pas dedans, revu à 12:05) `TransferActions` : `StashButton` « Tout prendre » et « Vers l'inventaire » (primary), plus de « Retour »). À 05:53 (joueur), le même bouton avait envoyé `claim.all` directement. Trame de « Tout prendre » ❓ : le bot accepte `claim.all`, `claim.item` ou `update.state` `pendingCount: 0`, puis quitte par Échap. Le butin se vend dans le stash (`sell.item` → `profile:receive.credits`) : le bot ne vend rien.
+- **Réparation** ✅ (`ws_dump --dom` du 24/10, 08:40, joueur, et code du jeu `expeditions-pidl-drone-repair-modal.tsx`) :
+  « Réparation » (`Button` de `ExpeditionsPidlDroneLaunch`, actif sans mission ni réparation et sous le maximum)
+  ouvre un panneau `ExpeditionsPidlDroneSideout` (`data-onboarding-300-id="PidlDroneRepairBody"`) : curseur
+  `PidlDroneRepairSliderTrackStyled` (clic = durabilité visée, `round(position × max)`, bornée à actuelle + 1 .. max,
+  **100 par défaut**), valeur dans `PidlDroneRepairSliderBubbleStyled`, coût et durée en bas, puis bouton
+  « Réparation » → `event:repair {targetDurability}` → `drone-missions:repair` (options complètes, `drone.isRepairing`,
+  `drone.repair {startDurability, targetDurability, totalSeconds, secondsRemaining, cost}`) et
+  `profile:receive.credits` (montant négatif) : **payé d'avance**, 200 CR et 200 s par point. En cours :
+  `PidlDroneLaunchRepairInline` (minuteur) et « Arrêt » → fenêtre `ExpeditionsPidlDroneAbortRepairDialog` →
+  `event:repair.cancel`, **sans remboursement** (`abort-no-refund` ; 14 200 CR perdus à 08:40). Le drone ne part
+  pas en réparation (`isRepairing`), ni à 0 de durabilité. Bot (`repair_while_charging`, désactivé par défaut) :
+  seulement pendant la recharge, ce qui finit avant que la batterie suffise, jusqu'à `repair_target` (26), au plus
+  `max_repair_cr`, curseur vérifié dans la bulle avant de payer, coût vérifié dans la trame, jamais « Arrêt ».
 - Bot (`run_drone`, partie `drone`, maquette `&drone=<batterie>&dronedur=<durabilité>`) : courrier, départ si
-  batterie ≥ coût et durabilité ≥ `min_durability`, surveillance jusqu'au retour, prochain passage dans `state.json`
+  batterie ≥ coût et durabilité ≥ `min_durability` (1 par défaut depuis le 24/10 : la durabilité ne change pas le
+  risque, dégâts 5 / 12 / 25 selon l'issue, réparer plus tard coûte autant par point), surveillance jusqu'au retour, prochain passage dans `state.json`
   (`drone.next` : retour de mission ou batterie rechargée).
 
 ## 12. Pièges rencontrés pendant l'inspection
