@@ -184,3 +184,24 @@ def test_extension_no_owned_software_reads_is_refused_before_signing(tmp_path):
     state.save()
     bot.state = cor3_bot.State(tmp_path / "state.json")
     assert "aucun de tes logiciels" in bot.decrypt_problem(contract("xvct"))
+
+
+def test_decrypt_contract_with_poor_odds_is_refused(tmp_path):
+    """24/10 : Decrypt & Extract .eb54x [15, 28] avec « big decrypt » à 16 de puissance (2 chances sur 14),
+    perdu avec 712 CR de dépôt. Les paris à pile ou face ([18, 25] avec 21) restent signés."""
+    bot, state, _ = make_bot(tmp_path)
+    bot.cfg["jobs"]["decrypt_presets"] = {"eb52x": "decrypt", "default": "big decrypt"}
+
+    def contract(ext, levels):
+        j = job(f"dec-{ext}", "DecryptFile", 2033)
+        j["conditions"] = {"items": [{"type": "DecryptFile", "details": {
+            "extensions": [{"ext": f".{ext}", "encryptionLevel": levels}]}}]}
+        return j
+
+    assert bot.decrypt_problem(contract("eb54x", [15, 28])) is None      # puissance encore inconnue : on tente
+    state.note_decrypt_power("big decrypt", "eb54x", "16.0")
+    state.note_decrypt_power("decrypt", "eb52x", "21.0")
+    assert "14% de chances" in bot.job_refusal_reason(contract("eb54x", [15, 28]))
+    assert bot.decrypt_odds("eb52x", [18, 25]) == 0.5
+    assert bot.decrypt_problem(contract("eb52x", [18, 25])) is None
+    assert bot.decrypt_problem(contract("eb52x", [4, 10])) is None

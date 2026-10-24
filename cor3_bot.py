@@ -117,6 +117,8 @@ TXT = {
     "infos": r"^\s*(Infos|Info)\s*$",
     "ready": r"PRÊT À TERMINER|READY TO COMPLETE",
     "in_progress": r"EN COURS|IN PROGRESS",
+    "failed_badge": r"\b(ÉCHOUÉE|FAILED)\b",
+    "dismiss": r"^\s*(Fermer|Dismiss)\s*$",
     "connect": r"^\s*(Connecter|Connect)\s*$",
     "login": r"^\s*(Connexion|Login)\s*$",
     "decrypt": r"^\s*(Déchiffrer|Decrypt)\s*$",
@@ -341,6 +343,17 @@ class State:
 
     def unreadable_by(self, ext: str) -> str | None:
         return (self.data.get("unreadable") or {}).get(ext)
+
+    def note_decrypt_power(self, preset: str, ext: str, power: Any) -> None:
+        """Puissance de déchiffrement lue dans l'analyse du fichier, par préréglage et extension (elle dépend
+        du logiciel et du matériel du préréglage) : sert à estimer les chances d'un contrat avant de le signer."""
+        try:
+            self.data.setdefault("decrypt_power", {})[f"{preset}|{ext}"] = float(power)
+        except (TypeError, ValueError):
+            pass
+
+    def decrypt_power(self, preset: str, ext: str) -> float | None:
+        return (self.data.get("decrypt_power") or {}).get(f"{preset}|{ext}")
 
     def note_readable(self, exts: list[str]) -> None:
         """Extensions que les logiciels possédés savent déchiffrer (loadout:get.options, `specs[].fileTypes`),
@@ -740,7 +753,21 @@ class Bot:
             except PWError:
                 break
 
+    def leave_stash(self) -> None:
+        """Page Stash ouverte (elle masque le dock) : Échap sur l'écran de transfert, puis « Retour ».
+        24/10 : ouverte à la main pendant la surveillance du drone, le bot ne trouvait plus Expéditions."""
+        if not self.page.locator(cname("StashPage")).count():
+            return
+        if self.page.locator(cname("TransferPanel")).count():
+            self.page.keyboard.press("Escape")
+            self.pause(500)
+        back = self.page.locator(cname("StashHeader")).locator(cname("StashButton")).filter(has_text=rx(TXT["back"]))
+        if back.count():
+            self.safe_click(back.first)
+            self.pause(800)
+
     def close_all_windows(self) -> None:
+        self.leave_stash()
         for _ in range(12):
             btn = self.page.locator(f"{WINDOW} {CLOSE_BTN}")
             if not btn.count():
@@ -1309,30 +1336,45 @@ class Bot:
 
     def find_job_card(self, market: Locator, job: dict) -> Locator:
         """Retrouve la carte d'un job (les cartes n'exposent pas l'id) : nom + serveur + gains.
-        Les jobs signés n'affichent que « Temps restant / EN COURS » : on déplie pour voir le serveur."""
+        Les jobs signés n'affichent que « Temps restant / EN COURS » : on déplie pour voir le serveur et, dans la
+        description, la cible (fichier, IP, log). 24/10 : deux File Decryption signés sur D4RK, serveur « N/A »
+        tous les deux, le bot avait ouvert le perdu (« Terminer » grisé) au lieu de celui qui venait de réussir."""
         server = self.job_server(job) or "N/A"
+        details = self.job_details(job)
+        targets = [str(t) for t in [f.get("name") for f in details.get("files") or [] if isinstance(f, dict)]
+                   + list(details.get("ips") or []) + list(details.get("logNames") or []) if t]
         cr = f"{job.get('rewardCredits', 0):,}"
         taken = job.get("status") == "TAKEN"
+        failed = job.get("status") == "FAILED"
         corp = job.get("corporation")
         cards = market.locator(comp("JobCard"))
+        fallback = None                 # cible absente de toutes les cartes (nom changé, Decrypt & Extract) : l'ancien choix
         for i in range(cards.count()):
             card = cards.nth(i)
             text = card.inner_text()
             if job["name"] not in text:
                 continue
             is_running = bool(re.search(f"{TXT['in_progress']}|{TXT['ready']}", text, re.I))
-            if taken != is_running:
+            if taken != is_running or failed != bool(re.search(TXT["failed_badge"], text, re.I)):
                 continue
-            if not taken and cr not in text:
+            if not (taken or failed) and cr not in text:
                 continue
-            if server not in text or (corp and corp not in text):
+            taken_like = taken or failed
+            if (server not in text or (corp and corp not in text)
+                    or (taken_like and targets and not any(t in text for t in targets))):
                 more = self.button(card, "read_more")
                 if more.count():
                     more.first.click()
                     self.pause(400)
                     text = card.inner_text()
-            if server in text and (not corp or corp in text):
-                return card
+            if server not in text or (corp and corp not in text):
+                continue
+            if taken_like and targets and not any(t in text for t in targets):
+                fallback = fallback or card
+                continue
+            return card
+        if fallback is not None:
+            return fallback
         raise StepFailed(f"carte introuvable pour le job {job['name']} ({server})")
 
     def sign_job(self, market: Locator, job: dict) -> int | None:
@@ -1395,6 +1437,30 @@ class Bot:
         if self.state is not None:
             self.state.clear_job_pending(current.get("id"))
 
+    def dismiss_job(self, market_name: str, job: dict) -> None:
+        """Job expiré ou raté (FAILED, badge « Échouée ») : « Infos » puis « Fermer » (market.job.dismiss) dans le
+        panneau → market:job.dismiss {status: ok}, et le jeu recharge la liste. La pénalité est déjà appliquée :
+        fermer ne coûte rien, la carte disparaît (demande du joueur le 24/10)."""
+        market = self.open_market(market_name)
+        card = self.find_job_card(market, job)
+        more = self.button(card, "read_more")
+        if more.count():
+            more.click()
+            self.pause(400)
+        card.locator(comp("Button")).last.click()                           # bouton « Infos »
+        side = self.page.locator(cname("JobSideout"))
+        side.wait_for(timeout=8000)
+        if not self.allowed(f"fermer le job expiré {job['name']} ({market_name})"):
+            return
+        mark = self.events.mark()
+        self.button(side, "dismiss").click()
+        ev = self.wait_event("market", "job.dismiss", mark, timeout=15)
+        if (ev.data or {}).get("status") != "ok":
+            raise StepFailed(f"fermeture du job expiré refusée : {ev.data}")
+        self.log.info("Job expiré fermé : %s sur %s", job["name"], market_name)
+        if self.state is not None:
+            self.state.clear_job_pending(job.get("id"))
+
     def run_jobs(self, only_due: bool | None = None) -> str:
         """Pour chaque marché (config [markets] names) : ouvre l'onglet Contrats (ce qui relance son
         minuteur), termine les jobs déjà signés, puis signe et fait de nouveaux jobs selon la politique.
@@ -1422,6 +1488,18 @@ class Bot:
                 if data is None:
                     continue
                 seen.append(name)
+                # 0) jobs expirés ou ratés : fermer leur carte à chaque fois qu'on les voit
+                if jcfg.get("dismiss_failed", True):
+                    for job in data.get("recentJobs") or []:
+                        if job.get("status") != "FAILED" or job.get("id") in handled:
+                            continue
+                        handled.add(job.get("id"))
+                        try:
+                            self.dismiss_job(name, job)
+                            notes.append(f"{job['name']} ({name}) expiré : fermé")
+                        except (StepFailed, PWError) as exc:
+                            self.log.warning("Job expiré %s (%s) non fermé : %s", job["name"], name,
+                                             str(exc).splitlines()[0])
                 # a) jobs déjà signés : terminer ceux qui sont prêts, faire les autres
                 for job in data.get("recentJobs") or []:
                     if job.get("status") != "TAKEN" or job.get("id") in handled:
@@ -1761,10 +1839,29 @@ class Bot:
             if ext and readable is not None and ext not in readable:
                 return (f"fichier .{ext} : aucun de tes logiciels ne le déchiffre "
                         f"(ils lisent {', '.join('.' + r for r in readable) or 'rien'})")
+            odds = self.decrypt_odds(ext, e.get("encryptionLevel"))
+            if odds is not None and odds < float(self.cfg["jobs"].get("min_decrypt_odds", 0.34)):
+                return (f"fichier .{ext} de niveau {e.get('encryptionLevel')} pour une puissance de "
+                        f"{self.state.decrypt_power(self.decrypt_preset(ext), ext):g} : {odds:.0%} de chances "
+                        "(min_decrypt_odds)")
             if ext and self.state.unreadable_by(ext) == self.decrypt_preset(ext):
                 return (f"fichier .{ext} illisible par le préréglage « {self.decrypt_preset(ext)} » "
                         "(déjà vu : pas de bouton Déchiffrer)")
         return None
+
+    def decrypt_odds(self, ext: str, levels: Any) -> float | None:
+        """Chances de pouvoir déchiffrer le fichier tiré, si le niveau est uniforme sur la plage annoncée
+        (ex. [18, 25] avec 21 de puissance : 4 sur 8). None si la puissance de ce préréglage est encore inconnue."""
+        if self.state is None or not ext or not isinstance(levels, (list, tuple)) or len(levels) != 2:
+            return None
+        power = self.state.decrypt_power(self.decrypt_preset(ext), ext)
+        try:
+            low, high = int(levels[0]), int(levels[1])
+        except (TypeError, ValueError):
+            return None
+        if power is None or high < low:
+            return None
+        return max(0.0, min(1.0, (int(power) - low + 1) / (high - low + 1)))
 
     def do_decrypt_job(self, details: dict) -> None:
         files = details.get("files") or []
@@ -1814,6 +1911,8 @@ class Bot:
         if level and power:
             self.log.info("%s : niveau de chiffrement %s, puissance de déchiffrement %s (préréglage « %s »)",
                           target.get("name"), level.group(1), power.group(1), self._current_preset)
+        if power and self.state is not None and ext:
+            self.state.note_decrypt_power(preset, ext, power.group(1))
         if decrypt.first.is_disabled() or (level and power and float(level.group(1)) > float(power.group(1))):
             # 22/10 : niveau 25 contre puissance 21, bouton Déchiffrer grisé
             raise Hopeless(f"{target.get('name')} : niveau de chiffrement {level.group(1) if level else '?'} > "
@@ -2599,6 +2698,7 @@ class Bot:
     def open_drone(self) -> dict:
         """Ouvre l'onglet Drone personnel ; renvoie drone-missions:get.options (drone, batterie, missions)."""
         mark = self.events.mark()
+        self.leave_stash()
         self.close_window(comp("ExpeditionsApplication"))
         self.dock("expeditions")
         win = self.window(comp("ExpeditionsApplication"))
@@ -2797,13 +2897,7 @@ class Bot:
             claimed += self.events.find(mark, "mail", "claim.item")
             return f"courrier : {len(claimed)} objet(s) récupéré(s)" if claimed else "courrier : butin récupéré"
         finally:
-            if transfer.count():
-                self.page.keyboard.press("Escape")
-                self.pause(500)
-            back = self.page.locator(cname("StashHeader")).locator(cname("StashButton")).filter(has_text=rx(TXT["back"]))
-            if back.count():
-                self.safe_click(back.first)
-                self.pause(800)
+            self.leave_stash()
 
     def mail_claimed(self, since: int) -> bool:
         """Une trame dit que le courrier est vidé : claim.all, claim.item, ou update.state sans rien en attente."""

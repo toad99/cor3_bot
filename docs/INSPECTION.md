@@ -235,7 +235,18 @@ v1.25.71 ✅ (relevé `ws_dump` du 21/10 à 23:44) :
   logiciel compatible, l'analyse du fichier affiche « Puissance de déchiffrement 0.0 [Aucun programme compatible
   installé] » (24/10, 05:51 : `.12vvsh` perdu sur URM7-M). Changer de préréglage n'y fait rien. Le bot garde la liste
   (`state.json` « readable », mise à jour à chaque ouverture du Loadout) et refuse avant signature toute autre
-  extension. Après un achat de module : nouveau préréglage dans `decrypt_presets`, ou retirer la ligne. Le nom ne
+  extension. Chances (24/10) : la puissance lue dans l'analyse est gardée par préréglage et extension
+  (`decrypt_power`) ; avant de signer, chances = (puissance − min + 1) / (max − min + 1) sur la plage annoncée,
+  refus sous `min_decrypt_odds` (0,34 : [18, 25] avec 21 = 50 % passe, `.eb54x [15, 28]` avec 16 = 14 % non).
+  Les plages ne sont pas strictes (`.eb52x [14, 34]` a donné 27). Carte d'un job signé (24/10) : dépliée, elle
+  affiche la cible (`data_9705.eb52x`) ; deux File Decryption signés avaient le même nom et le serveur « N/A »,
+  `find_job_card` les distingue maintenant par la cible. Page Stash ouverte à la main = dock masqué : `leave_stash`.
+  Jobs expirés ou ratés (24/10, code du jeu `job-card-collapsed.tsx`, `job-sideout-footer.tsx`, traductions
+  `/locales/fr/translation.json`) : `recentJobs[].status = "FAILED"`, badge `JobCardCollapsedStatusBadge`
+  « Échouée » / « Failed » ; « Infos » ouvre `JobSideout` dont le seul bouton est « Fermer » / « Dismiss »
+  (`market.job.dismiss`) → `market:job.dismiss {status: "ok"}`, puis `get.jobs`. Le bot les ferme à chaque visite
+  (`dismiss_failed`, demande du joueur). Existe aussi « Échouer » (`market.job.fail`, `job.fail`) : jamais utilisé.
+  Après un achat de module : nouveau préréglage dans `decrypt_presets`, ou retirer la ligne. Le nom ne
   suffit pas à reconnaître un job : « Data Download » existe aussi avec un type géré (URM7-M), seul `jobType` compte.
 - v1.25.71 ✅ (relevé `ws_dump` du 21/10) : `conditions = {hasDeposit, hasRepFine, serverConfigId, items[]}`,
   chaque élément `{type, label, isPrimary, subsystem, details}`. La tâche principale a `isPrimary: true` et

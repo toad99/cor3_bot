@@ -542,3 +542,37 @@ def test_drone_repair_plan(tmp_path):
     assert bot.repair_plan(opts(0, 0)) == (5, 1000)            # plafond
     cfg["drone"]["max_repair_cr"] = 5000
     assert bot.repair_plan(opts(0, 80)) == (25, 5000)          # durabilité 0 : sans attendre la batterie
+
+
+def test_signed_job_card_found_by_its_target(make_bot):
+    """24/10 : deux File Decryption signés sur D4RK (serveur N/A tous les deux), le premier perdu : la carte se
+    reconnaît au fichier visé, affiché quand on la déplie."""
+    bot = make_bot(jobs=None)
+    card = lambda f: (f'<div data-sentry-component="JobCard"><div>File Decryption</div><div>Temps restant 1h</div>'
+                      f'<div>En cours</div><div class="more" style="display:none">N/A · {f}</div>'
+                      '<button onclick="this.parentElement.querySelector(\'.more\').style.display=\'block\'">'
+                      'LIRE PLUS</button></div>')
+    bot.page.evaluate("html => { document.getElementById('windows').innerHTML = html; }",
+                      card("data_9705.eb52x") + card("export_1770.ab52p"))
+    job = {"name": "File Decryption", "status": "TAKEN", "relatedServers": [], "conditions": {"items": [
+        {"isPrimary": True, "details": {"files": [{"name": "export_1770.ab52p"}]}}]}}
+    assert "export_1770.ab52p" in bot.find_job_card(bot.page.locator("#windows"), job).inner_text()
+    job["conditions"]["items"][0]["details"]["files"] = [{"name": "log_2764.dat"}]   # nom absent : ancien choix
+    assert "data_9705.eb52x" in bot.find_job_card(bot.page.locator("#windows"), job).inner_text()
+
+
+def test_drone_reopened_from_the_stash_page(make_bot):
+    """24/10 : page Stash ouverte pendant la surveillance (elle masque le dock) : le bot la quitte."""
+    bot = make_bot(jobs=None)
+    bot.page.evaluate("openStash()")
+    assert bot.open_drone()["drone"]["name"] == "Agatha"
+    assert bot.page.locator(cor3_bot.cname("StashPage")).count() == 0
+
+
+def test_expired_job_is_dismissed(make_bot, tmp_path):
+    """24/10 (demande du joueur) : un job expiré (FAILED, « Échouée ») est fermé dès qu'on le voit."""
+    bot = make_bot(extra="&jobs=failed", state=cor3_bot.State(tmp_path / "state.json"))
+    summary = bot.run_jobs()
+    assert mock(bot).get("dismissed") == ["job-1"], summary
+    assert "Log Download (D4RK RM7MI) expiré : fermé" in summary
+    assert mock(bot)["completed"] == []

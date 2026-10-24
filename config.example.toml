@@ -35,6 +35,9 @@ allow_ip_add = false      # IP Injection (ajout d'IP) — écran non vérifié e
 # ni de piratage. Ce qui reste faisable est repris au passage horaire suivant.
 max_jobs_per_run = 3
 max_deposit_cr = 0        # 0 = ne signe jamais un job qui demande un dépôt
+dismiss_failed = true     # fermer la carte des jobs expirés ou ratés (« Échouée » → « Fermer ») à chaque visite
+min_decrypt_odds = 0.34   # déchiffrement : chances minimales (niveau tiré dans la plage annoncée, d'après la
+                          # puissance déjà lue pour ce préréglage) ; 0 = tout signer
 max_rep_penalty = 100     # ignore les jobs dont la pénalité REP dépasse ce seuil
 skip_servers = []         # ex. ["RM7-N2ECP"]
 # Préréglages Loadout (noms exacts de tes préréglages) selon l'extension du fichier

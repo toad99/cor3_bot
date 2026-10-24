@@ -478,6 +478,8 @@ if (params.get('jobs') === '2') JOBS['m-d4rk'].push({...JOBS['m-d4rk'][0], id: '
   jobType: 'DownloadFile', rewardCredits: 1200, conditions: {...JOBS['m-d4rk'][0].conditions, items: [
     JOBS['m-d4rk'][0].conditions.items[0], {type: 'DownloadFile', label: 'Data Download', isPrimary: true, subsystem: 'files', details: null}]}});
 if (params.get('jobs') === 'taken') takeJob(JOBS['m-d4rk'][0]);
+// ?jobs=failed : le job a expiré (FAILED, badge « Échouée ») ; « Infos » puis « Fermer » → market:job.dismiss
+if (params.get('jobs') === 'failed') { takeJob(JOBS['m-d4rk'][0]); JOBS['m-d4rk'][0].status = 'FAILED'; }
 const LOGS = [{seq: 4, message: 'Backup job finished successfully', sizeMb: 37.7, source: 'generated'},
               {seq: 24, message: 'Disk I/O spike detected on node node-2', sizeMb: 3.52, source: 'job'},
               {seq: 9, message: 'Backup job finished successfully', sizeMb: 3.86, source: 'generated'}];
@@ -537,20 +539,22 @@ function renderJobs(marketId) {
   let body = site.querySelector('.market-body');
   if (!body) { body = el('<div class="market-body"></div>'); site.append(body); }
   body.innerHTML = JOBS[marketId].filter(j => j.status !== 'COMPLETED').map(j => {
-    const taken = j.status === 'TAKEN', srv = j.relatedServers[0].serverName;
-    const head = taken ? `<div>${j.name}</div><div>Temps restant 09:59</div><div>${j.canComplete ? 'PRÊT À TERMINER' : 'EN COURS'}</div>`
+    const taken = j.status === 'TAKEN' || j.status === 'FAILED', srv = j.relatedServers[0].serverName;
+    const badge = j.status === 'FAILED' ? 'Échouée' : j.canComplete ? 'PRÊT À TERMINER' : 'EN COURS';
+    const head = taken ? `<div>${j.name}</div><div>Temps restant 09:59</div><div>${badge}</div>`
                        : `<div>${j.name}</div><div>${j.corporation} · ${srv}</div><div>${j.rewardCredits.toLocaleString('en-US')} CR</div>`;
     return `<div data-sentry-component="JobCard">${head}<div class="more" style="display:none">${j.corporation} · ${srv}</div>
       <button data-sentry-component="Button" onclick="this.parentElement.querySelector('.more').style.display='block'">LIRE PLUS</button>
-      <button data-sentry-component="Button" onclick="openSideout('${marketId}', '${j.id}', '${taken ? 'complete' : 'sign'}')">${taken ? 'Infos' : 'Signer'}</button></div>`;
+      <button data-sentry-component="Button" onclick="openSideout('${marketId}', '${j.id}', '${j.status === 'FAILED' ? 'dismiss' : taken ? 'complete' : 'sign'}')">${taken ? 'Infos' : 'Signer'}</button></div>`;
   }).join('');
 }
 function openSideout(marketId, jobId, mode) {
   document.querySelectorAll('[data-component-name=JobSideout]').forEach(x => x.remove());
   const j = JOBS[marketId].find(x => x.id === jobId);
   document.body.append(el(`<div data-component-name="JobSideout"><div>${j.name} · ${j.corporation}</div>
+    ${mode === 'dismiss' ? `<button onclick="dismissJob('${marketId}', '${jobId}')">Fermer</button></div>` : `
     <button onclick="this.parentElement.remove()">Annuler</button>
-    <button onclick="${mode === 'sign' ? 'signJob' : 'completeJob'}('${marketId}', '${jobId}')">${mode === 'sign' ? 'Signer' : 'Terminer'}</button></div>`));
+    <button onclick="${mode === 'sign' ? 'signJob' : 'completeJob'}('${marketId}', '${jobId}')">${mode === 'sign' ? 'Signer' : 'Terminer'}</button></div>`}`));
 }
 function takeJob(j) {        // une fois signé, la tâche principale révèle sa cible ; l'échéance apparaît
   j.conditions.items.find(i => i.isPrimary).details = {logSeqs: [24], logNames: ['Disk I/O spike detected on node node-2']};
@@ -570,6 +574,13 @@ function addRenown(points) {
   if (p >= 900) { level++; p -= 900; }
   prog.textContent = p;
   lvl.textContent = `${(level + p / 900).toFixed(3)} RENOMMÉE`;
+}
+function dismissJob(marketId, jobId) {
+  JOBS[marketId] = JOBS[marketId].filter(x => x.id !== jobId);
+  document.querySelectorAll('[data-component-name=JobSideout]').forEach(x => x.remove());
+  (window.__mock.dismissed = window.__mock.dismissed || []).push(jobId);
+  emit('market', 'job.dismiss', {status: 'ok'});
+  renderJobs(marketId); emitJobs(marketId);
 }
 function completeJob(marketId, jobId) {
   const j = JOBS[marketId].find(x => x.id === jobId);
